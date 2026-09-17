@@ -20,6 +20,7 @@ from fastmcp import FastMCP
 
 from .banner import configure_logging, emit_banner
 from .client import BuildiumError
+from .config import is_download_request_path, is_upload_request_path
 from .guards import GuardViolation, check_write, write_mode
 from .runtime import (
     Runtime,
@@ -276,7 +277,8 @@ async def call_endpoint(
 def created_fixtures() -> dict[str, Any]:
     """List records created during this session, grouped by collection. These are
     the only records that updates and deletes are permitted against in 'fixtures'
-    mode. Also written to test-artifacts.log for cleanup."""
+    mode. Also appended to created-records.log (see buildium_health for the
+    path) so they can be cleaned up after the process is gone."""
     rt = get_runtime()
     return {"ok": True, "created": rt.tracker.summary(), "log": str(rt.config.artifact_log)}
 
@@ -314,9 +316,19 @@ async def upload_file(
     entity_id:   the ID of that record.
     upload_path: for files belonging to a bill, check, or task history, pass
                  that resource's own uploads path, e.g.
-                 "/v1/bills/{billId}/files/uploads".
+                 "/v1/bills/123/files/uploads". Only Buildium's seven
+                 upload-request endpoints are accepted here, in every mode.
     """
     rt = get_runtime()
+    if not is_upload_request_path(upload_path if upload_path.startswith("/")
+                                  else "/" + upload_path):
+        return {
+            "ok": False,
+            "error": f"{upload_path!r} is not one of Buildium's upload-request "
+                     "endpoints (…/files/uploads or …/images/uploads with numeric "
+                     "ids). This tool only starts uploads; use "
+                     "buildium_call_endpoint for other requests.",
+        }
     source = Path(file_path).expanduser()
     if not source.is_file():
         return {"ok": False, "error": f"No file at {source}"}
@@ -371,10 +383,22 @@ async def download_file(
     save_to:       where to write the file on this machine
     download_path: for a file belonging to a bill, check, or task history, that
                    resource's own download path, e.g.
-                   "/v1/bills/{billId}/files/{fileId}/downloadrequest".
+                   "/v1/bills/123/files/456/downloadrequest". Only Buildium's
+                   seven download-request endpoints are accepted here, in
+                   every mode.
     """
     rt = get_runtime()
     path = download_path or f"/v1/files/{file_id}/downloadrequest"
+    if not path.startswith("/"):
+        path = "/" + path
+    if not is_download_request_path(path):
+        return {
+            "ok": False,
+            "error": f"{path!r} is not one of Buildium's download-request "
+                     "endpoints (…/downloadrequest or …/downloadrequests with "
+                     "numeric ids). This tool only fetches files; use "
+                     "buildium_call_endpoint for other requests.",
+        }
     try:
         data, content_type = await rt.client.download_file(path)
     except BuildiumError as exc:

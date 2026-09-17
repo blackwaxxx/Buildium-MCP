@@ -8,7 +8,7 @@ records.
 ## Reporting a vulnerability
 
 **Do not open a public issue.** Report privately through GitHub's
-[Security Advisories](https://github.com/OWNER/buildium-mcp/security/advisories/new)
+[Security Advisories](https://github.com/blackwaxxx/Buildium-MCP/security/advisories/new)
 so a fix can ship before details are public.
 
 Please include the deployment mode, the version, and a reproduction if you have
@@ -20,6 +20,9 @@ one. Expect an acknowledgement within a few days.
   `production-readonly-files`, including reaching past `BuildiumClient`.
 - Any path that widens the download carve-out beyond the seven endpoints in
   `DOWNLOAD_REQUEST_PATHS`, or aims one at a host outside the allowlist.
+- Any way to make `buildium_download_file` or `buildium_upload_file` send a
+  request to an endpoint outside `DOWNLOAD_REQUEST_PATHS` /
+  `UPLOAD_REQUEST_PATHS`, in any mode.
 - Any way to reach a production host without both `BUILDIUM_DEPLOYMENT_MODE`
   and a production `BUILDIUM_BASE_URL`.
 - Credentials appearing in `run.log`, in tool output, in the startup banner, or
@@ -43,3 +46,6 @@ These are deliberate, documented, and not vulnerabilities on their own. See
 - The "records created this session" set is in memory only and is empty after a
   restart.
 - `run.log` records request bodies, which for writes include record data.
+- `buildium_upload_file` reads any local file the server process can read, and
+  `buildium_download_file` writes to any local path it can write. The MCP client
+  decides who may call them.

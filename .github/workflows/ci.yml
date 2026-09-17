@@ -57,3 +57,26 @@ jobs:
           assert server.list_tags()["ok"] is True    # spec-only tools work uncredentialed
           print("clean-room OK:", health["spec"])
           PY
+
+  bundle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: astral-sh/setup-uv@v5
+      - run: pip install -e .
+      # The manifest is generated from the live tool list, so the package has
+      # to be importable here. Packing validates the manifest against the
+      # MCPB schema; the smoke test installs and launches the staged bundle
+      # exactly the way Claude Desktop does, in a fresh uv environment.
+      - run: python mcpb/build.py
+      - run: python mcpb/smoke.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: buildium-mcp-mcpb
+          path: dist/*.mcpb

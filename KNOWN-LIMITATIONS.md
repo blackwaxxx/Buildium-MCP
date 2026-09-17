@@ -39,7 +39,18 @@ nothing reads that file back. Use `BUILDIUM_WRITE_MODE=open` to operate on
 pre-existing records.
 
 Uploaded files are a related gap: Buildium creates the file record
-asynchronously after the signed-URL PUT, so it never lands in the tracker.
+asynchronously after the signed-URL PUT, so it never lands in the tracker. That
+finalization runs on Buildium's schedule, not the caller's — in the sandbox it
+has taken 2–5 seconds on most runs and over four minutes on others. A tool call
+that uploads and then immediately lists files may not see the new record.
+
+## The file tools touch the local filesystem
+
+`buildium_upload_file` reads whatever local path it is given, and
+`buildium_download_file` writes wherever it is told to. That is what they are
+for, but it means a client that grants them is granting file access on the
+machine the server runs on. Both are confined to Buildium's file endpoints on
+the network side; there is no equivalent confinement on the local side.
 
 ## Sandbox records cannot be cleaned up
 
@@ -80,6 +91,17 @@ hard-codes four `/v1/...` paths.
 Only HTTP 429 is retried, at most twice, honouring `Retry-After`. There is no
 exponential backoff, no jitter, no retry on 5xx or connection errors, and no
 client-side rate limiter. For bulk work, pace the calls yourself.
+
+## The Claude Desktop bundle is unsigned
+
+Claude Desktop reports a signature only when the operating system trusts the
+signing certificate for code signing. A self-signed certificate does not pass
+that check, so self-signing would display exactly as unsigned; and the
+publicly trusted certificates that would pass are issued with hardware-held
+keys the `mcpb sign` tool cannot use. The bundle therefore ships unsigned, and
+the install dialog says so. Organisations that enforce Claude Desktop's
+"signature required" policy cannot install it until that changes. Details in
+[mcpb/README.md](mcpb/README.md).
 
 ## The eval suite is not portable
 

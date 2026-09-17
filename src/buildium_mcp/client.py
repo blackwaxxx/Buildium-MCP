@@ -17,12 +17,12 @@ from urllib.parse import urlparse
 import httpx
 
 from .config import (
-    MUTATING_METHODS,
     PRODUCTION_HOSTS,
     SANDBOX_HOSTS,
     Config,
     DeploymentMode,
     is_download_request_path,
+    is_upload_request_path,
     request_permitted,
 )
 
@@ -84,9 +84,15 @@ class ReadOnlyTransportGuard(httpx.AsyncBaseTransport):
     an ``httpx.Request`` by hand and calling ``send()``, or by reaching past
     BuildiumClient entirely. Every route to the network passes through here.
 
-    The host is checked as well as the method, because an *absolute* URL handed
-    to httpx retargets the request away from base_url. Without that check a
-    caller could aim an allowlisted download path at a host of their choosing.
+    The host and scheme are checked for *every* request, not only mutating
+    ones, because an *absolute* URL handed to httpx retargets the request away
+    from base_url — and the client's default headers carry the API credentials.
+    Without that check a caller who reached the underlying client could aim an
+    allowlisted download path, or a credentialed GET, at a host of their
+    choosing.
+
+    Methods are judged by allowlist (config.SAFE_METHODS), so an unknown or
+    malformed verb is refused rather than waved through as "not a write".
     """
 
     def __init__(
@@ -101,28 +107,28 @@ class ReadOnlyTransportGuard(httpx.AsyncBaseTransport):
         self._allowed_hosts = allowed_hosts
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-        method = request.method.upper()
-        if method in MUTATING_METHODS:
-            host = (request.url.host or "").lower()
-            path = _wire_path(request)
-            if host not in self._allowed_hosts:
-                raise ReadOnlyViolation(
-                    f"{method} {path} blocked: host {host!r} is not an approved "
-                    f"Buildium host. No request was sent."
-                )
-            if not request_permitted(self._mode, method, path):
-                hint = (
-                    " Buildium issues file downloads as a POST; set "
-                    "BUILDIUM_DEPLOYMENT_MODE=production-readonly-files to permit "
-                    "those seven endpoints and nothing else."
-                    if method == "POST" and is_download_request_path(path)
-                    else ""
-                )
-                raise ReadOnlyViolation(
-                    f"{method} {path} blocked: this server is running in "
-                    f"{self._mode.value} mode, where mutating requests are refused "
-                    f"at the transport layer. No request was sent.{hint}"
-                )
+        method = request.method.strip().upper()
+        host = (request.url.host or "").lower()
+        path = _wire_path(request)
+        if request.url.scheme != "https" or host not in self._allowed_hosts:
+            raise ReadOnlyViolation(
+                f"{method} {path} blocked: {request.url.scheme}://{host} is not "
+                "an approved Buildium host over https. No request was sent."
+            )
+        if not request_permitted(self._mode, method, path):
+            hint = (
+                " Buildium issues file downloads as a POST; set "
+                "BUILDIUM_DEPLOYMENT_MODE=production-readonly-files to permit "
+                "those seven endpoints and nothing else."
+                if method == "POST" and is_download_request_path(path)
+                else ""
+            )
+            raise ReadOnlyViolation(
+                f"{method} {path} blocked: this server is running in "
+                f"{self._mode.value} mode, where only GET, HEAD and OPTIONS "
+                f"leave the process. Refused at the transport layer; no request "
+                f"was sent.{hint}"
+            )
         return await self._inner.handle_async_request(request)
 
     async def aclose(self) -> None:
@@ -198,7 +204,7 @@ class BuildiumClient:
         body: Any = None,
         max_retries: int = 2,
     ) -> Response:
-        method = method.upper()
+        method = method.strip().upper()
         if not path.startswith("/"):
             path = "/" + path
 
@@ -348,6 +354,14 @@ class BuildiumClient:
     # our credentials to a host named by an API response would leak them to
     # wherever that response pointed.
 
+    # The two helpers below take their request path from the MCP caller. Each
+    # is confined to the endpoints it exists for, in every deployment mode:
+    # otherwise "download this file" is an arbitrary empty-body POST and
+    # "upload this file" an arbitrary POST with a metadata body, in any mode
+    # where writes are allowed at all — skipping the spec lookup and the
+    # fixture tracker that call_endpoint applies. The check happens before
+    # any request is built, so nothing reaches the network.
+
     @staticmethod
     def _check_signed_url(url: str, purpose: str) -> None:
         parsed = urlparse(url)
@@ -368,6 +382,7 @@ class BuildiumClient:
     ) -> dict[str, Any]:
         """Run both halves of an upload. Returns the ticket plus the storage
         response status, so a caller can prove the bytes actually landed."""
+        request_path = _confined(request_path, is_upload_request_path, "upload")
         ticket = await self.request("POST", request_path, body=metadata)
         data = ticket.data if isinstance(ticket.data, dict) else {}
         upload_url = data.get("UploadUrl")
@@ -410,6 +425,7 @@ class BuildiumClient:
 
     async def download_file(self, request_path: str) -> tuple[bytes, str]:
         """Run both halves of a download. Returns (bytes, content-type)."""
+        request_path = _confined(request_path, is_download_request_path, "download")
         ticket = await self.request("POST", request_path)
         data = ticket.data if isinstance(ticket.data, dict) else {}
         url = data.get("DownloadUrl")
@@ -511,6 +527,21 @@ class BuildiumClient:
                 payload=data,
             )
         return BuildiumError(f"{base}. {detail}", status=status, payload=data)
+
+
+def _confined(path: str, allowed, purpose: str) -> str:
+    """Normalize a caller-supplied path and refuse it unless `allowed` says yes."""
+    if not path.startswith("/"):
+        path = "/" + path
+    if not allowed(path):
+        raise BuildiumError(
+            f"{path} is not a Buildium {purpose}-request endpoint, so "
+            f"{purpose}_file will not POST to it. This helper is confined to the "
+            f"seven {purpose} endpoints in every deployment mode; for anything "
+            "else use call_endpoint, which applies the write guardrails.",
+            status=None,
+        )
+    return path
 
 
 async def _sleep(seconds: float) -> None:

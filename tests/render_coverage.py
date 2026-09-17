@@ -272,7 +272,7 @@ def main() -> None:
     else:
         w("No write run recorded.")
     w("")
-    w("Every created ID is also appended to `test-artifacts.log`.")
+    w("Every created ID is also appended to `created-records.log`.")
     w("")
 
     OUT.write_text("\n".join(out) + "\n")

@@ -5,6 +5,10 @@
 First public release.
 
 ### Added
+- A Claude Desktop extension bundle (`.mcpb`, built by `mcpb/build.py`). Uses
+  the `uv` runtime, so Claude Desktop provisions Python and dependencies
+  itself and asks for the Buildium keys in a settings form. Ships unsigned;
+  see KNOWN-LIMITATIONS.md for why.
 - `BUILDIUM_DEPLOYMENT_MODE` selects the deployment mode. Previously this was a
   source constant, which a `pip install` user could only change by editing a
   file inside `site-packages`.
@@ -28,6 +32,15 @@ First public release.
   the reason — instead of silently swallowing every `OSError` at the write site.
 
 ### Fixed
+- `buildium_download_file` and `buildium_upload_file` accepted any request path.
+  In `sandbox` and `production-write` mode that made the read-only-annotated
+  download tool an arbitrary empty-body `POST`, and the upload tool an arbitrary
+  `POST` with a metadata body, bypassing the spec lookup and the fixture
+  tracker. Both helpers are now confined to Buildium's seven download / seven
+  upload endpoints in every mode.
+- The read-only transport guard refused `POST`/`PUT`/`PATCH`/`DELETE` and let
+  every other verb through. It now allows only `GET`, `HEAD` and `OPTIONS`, and
+  checks host and scheme for every request rather than only for writes.
 - README claimed 43 resource areas; the spec declares 42.
 - README and COVERAGE.md claimed all 238 GET operations executed. 208 were
   sent and 178 verified; the rest are `needs-setup` for want of a record id.

@@ -149,6 +149,6 @@ def check_write(
         raise GuardViolation(
             f"{method} {path} refused in 'fixtures' mode: this process did not "
             "create that record, so it will not modify or delete it. Records "
-            "created earlier in this run are listed in test-artifacts.log. "
+            "created earlier in this run are listed by buildium_created_fixtures. "
             "Set BUILDIUM_WRITE_MODE=open to operate on pre-existing records."
         )

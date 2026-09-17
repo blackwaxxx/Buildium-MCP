@@ -22,7 +22,7 @@ Ten curated shortcuts cover the reads that come up constantly, so routine
 questions skip the dance. Two file tools exist because Buildium's file flow
 cannot be expressed through `call_endpoint` at all.
 
-Indexing the whole 2.7MB document costs about 15ms at startup, so nothing here
+Indexing the whole 2.7MB document costs about 20ms at startup, so nothing here
 is lazy for performance reasons. `$ref` resolution *is* on demand, capped at
 depth 6 with cycle breaking, because a fully resolved schema graph is both
 enormous and circular.
@@ -52,7 +52,11 @@ whether a request may leave the process. Three places call it:
 1. **`ReadOnlyTransportGuard`** (`client.py`) — the real boundary. A transport
    is the last code that runs before httpx opens a socket, so this cannot be
    bypassed by calling `client.post()`, by hand-building a `Request` and calling
-   `send()`, or by reaching past `BuildiumClient` entirely.
+   `send()`, or by reaching past `BuildiumClient` entirely. It judges methods by
+   allowlist — only `GET`, `HEAD` and `OPTIONS` pass — so `TRACE`, `PROPFIND` or
+   a mistyped `P0ST` are refused rather than waved through as "not a write". It
+   is installed only in the two read-only modes; in `sandbox` and
+   `production-write` the client talks to httpx's default transport.
 2. **`BuildiumClient.request`** — advisory. Runs on the caller's un-normalized
    string purely to produce a clean error and an audit record, so it may be
    marginally stricter than the transport. That is fine.
@@ -70,9 +74,21 @@ cannot become separators and dot segments *after* the allowlist has approved
 the string. `url.path` is decoded, which would let `%2f..%2fleases` turn into
 `/../leases` inside a value already judged safe.
 
-It also binds the host. An absolute URL handed to httpx retargets the request
-away from `base_url`, so a path-only allowlist would let a caller aim a
-permitted download path at a server of their choosing.
+It also binds the host and scheme, for every method. An absolute URL handed
+to httpx retargets the request away from `base_url`, so a path-only allowlist
+would let a caller aim a permitted download path at a server of their choosing —
+and since the client's default headers carry the credentials, a retargeted `GET`
+would hand them to that server.
+
+### The file helpers are confined separately
+
+`buildium_download_file` and `buildium_upload_file` take their request path from
+the caller, and they bypass the spec lookup and fixture tracker that
+`call_endpoint` applies. So `BuildiumClient.download_file` refuses any path that
+is not one of the seven download endpoints, and `upload_file` any path that is
+not one of the seven upload endpoints, in every mode and before any request is
+built. Without that, in a write-capable mode the read-only-annotated download
+tool was an arbitrary empty-body `POST`.
 
 ## Policy and scope are kept apart
 

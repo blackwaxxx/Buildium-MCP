@@ -84,8 +84,16 @@ PRODUCTION_HOSTS = frozenset({"api.buildium.com"})
 DEFAULT_BASE_URL = "https://apisandbox.buildium.com"
 
 
-# Methods that can change state. In production-readonly these never leave the
-# process; see client.py.
+# The methods a read-only mode may send. An allowlist, deliberately: the earlier
+# denylist of POST/PUT/PATCH/DELETE let anything else through — TRACE, PROPFIND,
+# a mistyped "P0ST", or "POST " with a trailing space — because none of those
+# is one of the four names. Whether Buildium would honour such a method is
+# beside the point; a guard that has to know what the server does with every
+# possible verb is not structural. Everything outside this set is refused.
+SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+# Kept for callers that want to name the ordinary write verbs; the decision in
+# request_permitted does not use it.
 MUTATING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
 
@@ -115,9 +123,26 @@ DOWNLOAD_REQUEST_PATHS: frozenset[str] = frozenset({
     "/{architecturalRequestId}/files/{fileId}/downloadrequests",
 })
 
-# Every path parameter on those seven is int32 in the spec. Constraining them
-# to digits is what stops a caller smuggling a separator, a dot segment or an
-# encoded byte through a segment we were treating as opaque.
+# The seven POST endpoints that begin an upload. Like a download, an upload is
+# a two-step flow that starts with a POST for a signed URL; unlike a download it
+# is a genuine write and no read-only mode permits it. This set exists so that
+# BuildiumClient.upload_file can refuse to POST anywhere else — the MCP tool
+# takes the path from the caller, and without this the "upload" tool was an
+# arbitrary POST with a metadata body in every write-capable mode.
+UPLOAD_REQUEST_PATHS: frozenset[str] = frozenset({
+    "/v1/files/uploads",
+    "/v1/bills/{billId}/files/uploads",
+    "/v1/tasks/{taskId}/history/{taskHistoryId}/files/uploads",
+    "/v1/rentals/{propertyId}/images/uploads",
+    "/v1/rentals/units/{unitId}/images/uploads",
+    "/v1/bankaccounts/{bankAccountId}/checks/{checkId}/files/uploads",
+    "/v1/associations/ownershipaccounts/architecturalrequests"
+    "/{architecturalRequestId}/files/uploads",
+})
+
+# Every path parameter on those endpoints is int32 in the spec. Constraining
+# them to digits is what stops a caller smuggling a separator, a dot segment or
+# an encoded byte through a segment we were treating as opaque.
 _ID_PATTERN = r"[0-9]{1,10}"
 
 
@@ -132,11 +157,17 @@ def _compile_allowlist(templates: frozenset[str]) -> re.Pattern[str]:
     # \Z, not $: $ also matches just before a trailing newline, which is a real
     # bypass for an allowlist. re.IGNORECASE because Buildium's routing is
     # case-insensitive, so refusing /v1/Files/... would confuse without adding
-    # safety — the pattern is fully anchored either way.
-    return re.compile(r"\A(?:" + "|".join(alternatives) + r")\Z", re.IGNORECASE)
+    # safety — the pattern is fully anchored either way. re.ASCII so that
+    # IGNORECASE cannot fold non-ASCII look-alikes (U+017F "ſ" folds to "s")
+    # into a match; the wire path is ASCII, and this makes the advisory check
+    # on the caller's raw string agree with it.
+    return re.compile(
+        r"\A(?:" + "|".join(alternatives) + r")\Z", re.IGNORECASE | re.ASCII
+    )
 
 
 _DOWNLOAD_RE = _compile_allowlist(DOWNLOAD_REQUEST_PATHS)
+_UPLOAD_RE = _compile_allowlist(UPLOAD_REQUEST_PATHS)
 
 
 def is_download_request_path(path: str) -> bool:
@@ -150,14 +181,26 @@ def is_download_request_path(path: str) -> bool:
     return _DOWNLOAD_RE.match(path) is not None
 
 
+def is_upload_request_path(path: str) -> bool:
+    """Is this the path of one of Buildium's seven upload-request endpoints?
+
+    Same contract as is_download_request_path. This is not a mode decision —
+    no read-only mode permits an upload — it is what confines the upload helper
+    to the endpoints it exists for, in every mode.
+    """
+    return _UPLOAD_RE.match(path) is not None
+
+
 def request_permitted(mode: DeploymentMode, method: str, path: str) -> bool:
     """The single place that decides whether a request may leave this process.
 
     Every enforcement point calls this — the transport guard, the client's
     pre-flight check, and the write guard — so the three cannot drift apart.
     """
-    method = method.upper()
-    if method not in MUTATING_METHODS:
+    # strip() as well as upper(): "POST " is not "POST" to a set lookup, and
+    # httpx will happily put the padded form on the wire.
+    method = method.strip().upper()
+    if method in SAFE_METHODS:
         return True
     if mode.writes_allowed:
         return True

@@ -27,8 +27,9 @@ python tests/stdio_check.py       # full CRUD over real stdio JSON-RPC
 ## Things that will fail review
 
 **Adding an environment variable that affects the deployment mode.** There is
-exactly one, and `test_config_reads_exactly_one_mode_env_var` parses `config.py`
-to enforce that. If you think a second is needed, open an issue first.
+exactly one, and `test_package_reads_exactly_one_deployment_mode_env_var` parses
+every module in the package to enforce that. If you think a second is needed,
+open an issue first.
 
 **Widening the download carve-out by editing `DOWNLOAD_REQUEST_PATHS` alone.**
 It is re-derived from the spec by a test. If Buildium adds a download endpoint,

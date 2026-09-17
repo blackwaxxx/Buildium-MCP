@@ -39,9 +39,24 @@ tools exist because Buildium's file flow cannot be driven through
 
 ## Setup
 
-Requires Python 3.11+ and a Buildium **Premium** subscription with the Open API
-enabled (Settings → Application settings → Api settings) and an API key created
-under Settings → Developer Tools.
+You need a Buildium **Premium** subscription with the Open API enabled
+(Settings → Application settings → Api settings) and an API key created under
+Settings → Developer Tools.
+
+### Claude Desktop: one click
+
+Download `buildium-mcp-<version>.mcpb` from the releases page and double-click
+it (or drag it onto the Claude Desktop window). Claude Desktop asks for your
+Client ID and Client Secret in a settings form, stores them securely, and
+installs everything else itself — including Python, if your machine has none.
+Sandbox is the default; the same form has the deployment mode and base URL
+fields for when you are ready for production. The install dialog labels the
+bundle *unsigned*; that is expected — see [mcpb/](mcpb/) for how the bundle is
+built and why it is not signed.
+
+### Any other MCP client
+
+Requires Python 3.11+.
 
 ```bash
 pip install buildium-mcp
@@ -93,7 +108,7 @@ meanwhile.
 ### From a checkout
 
 ```bash
-git clone https://github.com/OWNER/buildium-mcp && cd buildium-mcp
+git clone https://github.com/blackwaxxx/Buildium-MCP && cd Buildium-MCP
 uv venv --python 3.11 && uv pip install -e ".[dev]"
 ```
 
@@ -151,7 +166,7 @@ pre-existing records structurally impossible rather than merely unlikely. Switch
 to `open` for real work.
 
 Every request goes to `run.log`; every created record ID goes to
-`test-artifacts.log`. Credentials are never written to either.
+`created-records.log`. Credentials are never written to either.
 
 ## Deployment mode
 
@@ -174,10 +189,11 @@ stray mode variable cannot redirect a sandbox server at live data.
 
 The read-only modes are not a policy check a caller can talk its way past.
 `ReadOnlyTransportGuard` sits in the httpx transport slot — the last code that
-runs before a socket is opened — and raises on every `POST`, `PUT`, `PATCH`, and
-`DELETE`, on any host outside the allowlist. Calling `client.post()` directly,
-hand-building an `httpx.Request`, or bypassing `BuildiumClient` entirely all hit
-the same wall. Tested by doing exactly that.
+runs before a socket is opened. It lets only `GET`, `HEAD` and `OPTIONS` through
+(an allowlist, so an unknown or malformed verb is refused too), and it refuses
+any request whose host is not a Buildium host over https, whatever the method.
+Calling `client.post()` directly, hand-building an `httpx.Request`, or bypassing
+`BuildiumClient` entirely all hit the same wall. Tested by doing exactly that.
 
 ### Why `production-readonly-files` exists
 
@@ -210,7 +226,7 @@ pytest                                 # offline, no credentials
 .venv/bin/python tests/stdio_check.py               # live sandbox
 ```
 
-The unit suite (214 tests) covers spec indexing, path resolution, response
+The unit suite (247 tests) covers spec indexing, path resolution, response
 shaping, `allOf` flattening, auto-pagination, deprecation handling, error hints,
 and every guardrail branch — all four deployment modes, the download allowlist
 proved exhaustively against the spec, and the packaging and startup paths —
@@ -272,7 +288,9 @@ Buildium never moves bytes through its API. An upload request returns an AWS S3
 to storage, and every signed header must be reproduced exactly or it fails with
 `SignatureDoesNotMatch`. Downloads mirror it through a URL that expires after
 five minutes. `buildium_upload_file` and `buildium_download_file` run both
-halves.
+halves. Each accepts a path for the resource the file belongs to, and each is
+confined to Buildium's seven upload or seven download endpoints in every mode —
+neither is a way to POST anywhere else.
 
 The signed URL points at a third-party host, so the transfer carries **no
 Buildium credentials** — sending the client secret to a host named by an API

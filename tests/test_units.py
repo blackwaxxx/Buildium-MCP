@@ -340,8 +340,9 @@ async def test_production_readonly_blocks_at_transport_layer(tmp_path, method):
 async def test_production_readonly_transport_permits_get(tmp_path):
     """The guard must not be a blanket network block — GET still reaches httpx.
 
-    Asserted by observing a connection failure to an unroutable host rather
-    than a ReadOnlyViolation: the request got past the guard and into httpx.
+    The guard's inner transport is swapped for a stub, so "reached httpx" is
+    observed as the stub's 200 coming back through the guard. Nothing leaves
+    the machine.
     """
     conf = _conf(tmp_path, cfg.DeploymentMode.PRODUCTION_READONLY,
                  base_url="https://apisandbox.buildium.com")
@@ -508,31 +509,44 @@ def test_unrecognized_mode_value_is_a_hard_error(raw):
         assert m.value in message, "the error must list every valid value"
 
 
-def test_config_reads_exactly_one_mode_env_var():
+# Environment variables that legitimately contain a mode-like word. Exactly
+# these two may be read anywhere in the package: the deployment-mode knob, and
+# the write-mode knob, which can only narrow what the deployment mode allows.
+_PERMITTED_MODE_LIKE_ENV_VARS = {cfg.MODE_ENV_VAR, "BUILDIUM_WRITE_MODE"}
+
+
+def test_package_reads_exactly_one_deployment_mode_env_var():
     """Source-level proof, stronger than the behavioural tests above.
 
     Fails in both directions: if the one legitimate variable is removed, and if
-    a second backdoor is ever added. Resolves module constants as well as string
-    literals, so routing a read through a name cannot hide it — and matches
-    os.environ[...] / os.environ.get(...), which the earlier getenv-only scan
-    would have missed entirely.
+    a second backdoor is ever added — in *any* module of the package, not just
+    config.py, since a read in runtime.py or paths.py would be just as much a
+    backdoor. Resolves module constants as well as string literals, so routing
+    a read through a name cannot hide it, and matches os.environ[...] /
+    os.environ.get(...) as well as os.getenv(...).
     """
     import ast
 
-    source = (ROOT / "src" / "buildium_mcp" / "config.py").read_text()
-    tree = ast.parse(source)
+    package = ROOT / "src" / "buildium_mcp"
+    trees = {
+        path.name: ast.parse(path.read_text())
+        for path in sorted(package.glob("*.py"))
+    }
+    assert "config.py" in trees and "runtime.py" in trees and "guards.py" in trees
 
-    # Module-level NAME = "literal", so a read through a constant resolves.
+    # Module-level NAME = "literal" in any module, so a read through a constant
+    # resolves — including a constant imported from config.py.
     constants: dict[str, str] = {}
-    for node in tree.body:
-        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant):
-            if isinstance(node.value.value, str):
-                for target in node.targets:
-                    if isinstance(target, ast.Name):
-                        constants[target.id] = node.value.value
-        elif isinstance(node, ast.AnnAssign) and isinstance(node.value, ast.Constant):
-            if isinstance(node.target, ast.Name) and isinstance(node.value.value, str):
-                constants[node.target.id] = node.value.value
+    for tree in trees.values():
+        for node in tree.body:
+            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant):
+                if isinstance(node.value.value, str):
+                    for target in node.targets:
+                        if isinstance(target, ast.Name):
+                            constants[target.id] = node.value.value
+            elif isinstance(node, ast.AnnAssign) and isinstance(node.value, ast.Constant):
+                if isinstance(node.target, ast.Name) and isinstance(node.value.value, str):
+                    constants[node.target.id] = node.value.value
 
     def resolve(node: ast.expr) -> str | None:
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
@@ -542,28 +556,31 @@ def test_config_reads_exactly_one_mode_env_var():
         return None
 
     names: list[str] = []
-    for node in ast.walk(tree):
-        arg = None
-        if isinstance(node, ast.Call) and node.args:
-            func = node.func
-            if isinstance(func, ast.Attribute) and func.attr in ("getenv", "get"):
-                arg = node.args[0]
-        elif isinstance(node, ast.Subscript):
-            value = node.value
-            if isinstance(value, ast.Attribute) and value.attr == "environ":
-                arg = node.slice
-        if arg is not None:
-            resolved = resolve(arg)
-            if resolved:
-                names.append(resolved)
+    for tree in trees.values():
+        for node in ast.walk(tree):
+            arg = None
+            if isinstance(node, ast.Call) and node.args:
+                func = node.func
+                if isinstance(func, ast.Attribute) and func.attr in ("getenv", "get"):
+                    arg = node.args[0]
+            elif isinstance(node, ast.Subscript):
+                value = node.value
+                if isinstance(value, ast.Attribute) and value.attr == "environ":
+                    arg = node.slice
+            if arg is not None:
+                resolved = resolve(arg)
+                if resolved:
+                    names.append(resolved)
 
+    assert cfg.MODE_ENV_VAR in names, "the one legitimate read has gone missing"
     mode_like = {
         name for name in names
         if any(word in name for word in
-               ("MODE", "PROD", "ALLOW", "READONLY", "UNSAFE", "FORCE"))
+               ("MODE", "PROD", "ALLOW", "READONLY", "UNSAFE", "FORCE", "WRITE"))
     }
-    assert mode_like == {cfg.MODE_ENV_VAR}, (
-        f"config.py should read exactly one mode-like env var, found: {mode_like}"
+    assert mode_like == _PERMITTED_MODE_LIKE_ENV_VARS, (
+        f"the package should read exactly {sorted(_PERMITTED_MODE_LIKE_ENV_VARS)}, "
+        f"found: {sorted(mode_like)}"
     )
 
 
@@ -1308,14 +1325,62 @@ def test_banner_distinguishes_the_two_readonly_modes():
     assert "blocked" in strict and "permitted" in files
 
 
-def test_banner_never_contains_a_secret():
+def test_banner_and_health_never_contain_a_secret(monkeypatch):
+    """Feed a real secret through the real path and assert it never comes out.
+
+    The earlier version of this test rendered a StartupStatus that had no
+    credential in it and asserted "SUPERSECRET" was absent — which it was,
+    trivially. Here the secret goes in through the environment, load_config
+    reads it, and both the banner and buildium_health's payload are checked.
+    """
+    import json as _json
+
+    from buildium_mcp import runtime as rt_mod
+    from buildium_mcp import server as server_mod
     from buildium_mcp.banner import render_banner
 
-    text = render_banner(_status(base_url="https://api.buildium.com"))
-    assert "SUPERSECRET" not in text
-    # and nothing that looks like a credential field is rendered at all
-    for word in ("client_secret", "CLIENT_SECRET", "x-buildium-client-secret"):
-        assert word not in text
+    secret = "SUPERSECRET-9f3a7c1e-do-not-print"
+    monkeypatch.setenv("BUILDIUM_CLIENT_ID", "client-id-SUPERSECRET-too")
+    monkeypatch.setenv("BUILDIUM_CLIENT_SECRET", secret)
+    rt_mod.reset()
+    try:
+        status = rt_mod.startup_status()
+        assert status.ok, status.error
+        assert rt_mod.get_runtime().config.client_secret == secret  # it really went in
+        text = render_banner(status)
+        health = _json.dumps(server_mod.health(), default=str)
+        for out in (text, health):
+            assert secret not in out
+            assert "SUPERSECRET" not in out
+            for word in ("client_secret", "CLIENT_SECRET", "x-buildium-client-secret"):
+                assert word not in out
+    finally:
+        rt_mod.reset()
+
+
+async def test_audit_log_never_contains_a_secret(tmp_path, monkeypatch):
+    """The request goes out with credential headers; the audit line must not."""
+    import json as _json
+
+    secret = "SUPERSECRET-audit-3b2c"
+    conf = cfg.Config(
+        base_url="https://apisandbox.buildium.com", client_id="id-SUPERSECRET",
+        client_secret=secret, spec_path=SPEC, run_log=tmp_path / "run.log",
+        artifact_log=None, fixture_prefix="ZZ-MCPTEST-",
+    )
+    client = BuildiumClient(conf)
+    inner = _StubTransport()
+    client._client._transport = inner
+    try:
+        await client.request("GET", "/v1/leases", query={"limit": 1})
+    finally:
+        await client.aclose()
+    assert inner.sent[0].headers["x-buildium-client-secret"] == secret  # it was sent
+    lines = (tmp_path / "run.log").read_text().splitlines()
+    assert len(lines) == 1
+    record = _json.loads(lines[0])
+    assert record["method"] == "GET" and record["path"] == "/v1/leases"
+    assert "SUPERSECRET" not in lines[0]
 
 
 def test_guarded_decorator_does_not_alter_any_tool_schema():
@@ -1384,3 +1449,185 @@ def test_no_tool_references_a_module_global_that_no_longer_exists():
         ]
 
     assert offenders == [], "\n".join(offenders)
+
+
+# -- the guard judges methods by allowlist ------------------------------------
+#
+# The first version refused POST/PUT/PATCH/DELETE and let everything else
+# through, on the theory that nothing else writes. That makes the guard depend
+# on what Buildium's server does with TRACE, PROPFIND or a mistyped "P0ST" —
+# which is not structural. Now only GET, HEAD and OPTIONS leave the process.
+
+
+@pytest.mark.parametrize("method", ["TRACE", "PROPFIND", "MERGE", "PURGE", "P0ST",
+                                    "POST ", " delete", "DELETE\n", "GETS"])
+async def test_readonly_guard_refuses_unknown_and_malformed_methods(method):
+    for mode in (cfg.DeploymentMode.PRODUCTION_READONLY,
+                 cfg.DeploymentMode.PRODUCTION_READONLY_FILES):
+        guard, inner = _guard(mode)
+        request = httpx.Request(method, "https://api.buildium.com/v1/vendors/1")
+        with pytest.raises(client_mod.ReadOnlyViolation):
+            await guard.handle_async_request(request)
+        assert inner.sent == []
+
+
+def test_safe_methods_are_exactly_get_head_options():
+    assert cfg.SAFE_METHODS == {"GET", "HEAD", "OPTIONS"}
+    for mode in cfg.DeploymentMode:
+        for method in cfg.SAFE_METHODS:
+            assert cfg.request_permitted(mode, method, "/v1/leases")
+        assert not cfg.request_permitted(
+            cfg.DeploymentMode.PRODUCTION_READONLY, "PROPFIND", "/v1/leases"
+        )
+
+
+async def test_guard_binds_host_and_scheme_for_reads_too():
+    """A GET carries the credential headers, so a retargeted GET is a leak.
+
+    The first version only checked the host for mutating methods.
+    """
+    guard, inner = _guard(cfg.DeploymentMode.PRODUCTION_READONLY)
+    for url in ("https://evil.example.com/v1/leases",
+                "http://api.buildium.com/v1/leases",           # cleartext
+                "https://api.buildium.com.evil.example/v1/leases",
+                "https://api.buildium.com@evil.example/v1/leases"):
+        with pytest.raises(client_mod.ReadOnlyViolation, match="not an approved"):
+            await guard.handle_async_request(httpx.Request("GET", url))
+    assert inner.sent == []
+    await guard.handle_async_request(
+        httpx.Request("GET", "https://API.buildium.com/v1/leases")
+    )
+    assert len(inner.sent) == 1
+
+
+# -- the file helpers are confined to their endpoints in every mode -----------
+#
+# buildium_download_file and buildium_upload_file take their request path from
+# the caller. Before this, in sandbox or production-write mode, that made the
+# "download" tool — annotated read-only — an arbitrary empty-body POST, and the
+# "upload" tool an arbitrary POST with a metadata body, neither of which went
+# through the spec lookup or the fixture tracker that call_endpoint applies.
+
+
+def test_upload_allowlist_matches_the_spec_exactly(index):
+    derived = {
+        ep.path for ep in index.endpoints
+        if ep.method.lower() == "post" and ep.path.rstrip("/").endswith("/uploads")
+    }
+    assert derived == set(cfg.UPLOAD_REQUEST_PATHS)
+    assert len(derived) == 7
+
+
+@pytest.mark.parametrize("path,allowed", [
+    ("/v1/files/uploads", True),
+    ("/v1/bills/12/files/uploads", True),
+    ("/v1/rentals/units/4/images/uploads", True),
+    ("/v1/files/uploads/", False),
+    ("/v1/files/uploads/../../vendors", False),
+    ("/v1/vendors", False),
+    ("/v1/files/5/downloadrequest", False),      # a download path is not an upload path
+    ("", False),
+])
+def test_upload_allowlist_unit_cases(path, allowed):
+    assert cfg.is_upload_request_path(path) is allowed
+
+
+def test_no_read_only_mode_permits_an_upload_request():
+    """Uploads are writes. The allowlist confines the helper; it grants nothing."""
+    for mode in (cfg.DeploymentMode.PRODUCTION_READONLY,
+                 cfg.DeploymentMode.PRODUCTION_READONLY_FILES):
+        for template in cfg.UPLOAD_REQUEST_PATHS:
+            concrete = re.sub(r"\{[^}]+\}", "1", template)
+            assert not cfg.request_permitted(mode, "POST", concrete)
+
+
+def _client_with_stub(tmp_path, mode):
+    """A BuildiumClient whose network is a stub, guard preserved if installed."""
+    client = BuildiumClient(_conf(tmp_path, mode))
+    stub = _StubTransport()
+    transport = client._client._transport
+    if isinstance(transport, ReadOnlyTransportGuard):
+        transport._inner = stub
+    else:
+        client._client._transport = stub
+    return client, stub
+
+
+@pytest.mark.parametrize("mode", list(cfg.DeploymentMode))
+async def test_download_helper_refuses_a_non_download_path_in_every_mode(tmp_path, mode):
+    client, stub = _client_with_stub(tmp_path, mode)
+    try:
+        for path in ("/v1/vendors", "v1/vendors", "/v1/files/5/downloadrequest/../../vendors"):
+            with pytest.raises(client_mod.BuildiumError, match="not a Buildium download"):
+                await client.download_file(path)
+        assert stub.sent == [], "nothing may reach the network"
+    finally:
+        await client.aclose()
+
+
+async def test_download_helper_posts_only_to_the_download_endpoint(tmp_path):
+    """Positive control for the test above: a real download path does go out."""
+    client, stub = _client_with_stub(tmp_path, cfg.DeploymentMode.SANDBOX)
+    try:
+        # The stub answers {} — no DownloadUrl — so the helper stops after the
+        # ticket request and never opens the unguarded transfer client.
+        with pytest.raises(client_mod.BuildiumError, match="no DownloadUrl"):
+            await client.download_file("v1/files/5/downloadrequest")
+        assert [(r.method, r.url.path) for r in stub.sent] == [
+            ("POST", "/v1/files/5/downloadrequest")
+        ]
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.parametrize("mode", list(cfg.DeploymentMode))
+async def test_upload_helper_refuses_a_non_upload_path_in_every_mode(tmp_path, mode):
+    client, stub = _client_with_stub(tmp_path, mode)
+    try:
+        for path in ("/v1/vendors", "/v1/files/5/downloadrequest", "/v1/files/uploads/x"):
+            with pytest.raises(client_mod.BuildiumError, match="not a Buildium upload"):
+                await client.upload_file(path, {"Title": "ZZ-MCPTEST-x"}, b"x", "x.txt")
+        assert stub.sent == []
+    finally:
+        await client.aclose()
+
+
+async def test_upload_helper_posts_only_to_the_upload_endpoint(tmp_path):
+    client, stub = _client_with_stub(tmp_path, cfg.DeploymentMode.SANDBOX)
+    try:
+        with pytest.raises(client_mod.BuildiumError, match="no UploadUrl"):
+            await client.upload_file("/v1/files/uploads", {"Title": "ZZ-MCPTEST-x"}, b"x", "x.txt")
+        assert [(r.method, r.url.path) for r in stub.sent] == [("POST", "/v1/files/uploads")]
+    finally:
+        await client.aclose()
+
+
+async def test_file_tools_refuse_a_foreign_path_before_any_request(tmp_path, monkeypatch):
+    """Through the MCP tool functions themselves, with a live runtime."""
+    from buildium_mcp import runtime as rt_mod
+    from buildium_mcp import server as server_mod
+
+    monkeypatch.setenv("BUILDIUM_CLIENT_ID", "x")
+    monkeypatch.setenv("BUILDIUM_CLIENT_SECRET", "y")
+    monkeypatch.setenv("BUILDIUM_STATE_DIR", str(tmp_path / "state"))
+    rt_mod.reset()
+    try:
+        rt = rt_mod.get_runtime()
+        assert rt.config.mode is cfg.DeploymentMode.SANDBOX  # the unguarded mode
+        stub = _StubTransport()
+        rt.client._client._transport = stub
+
+        result = await server_mod.download_file(
+            5, str(tmp_path / "out.bin"), download_path="/v1/vendors"
+        )
+        assert result["ok"] is False and "download-request" in result["error"]
+
+        source = tmp_path / "ZZ-MCPTEST-x.txt"
+        source.write_bytes(b"x")
+        result = await server_mod.upload_file(
+            str(source), "ZZ-MCPTEST-x", 1, upload_path="/v1/vendors"
+        )
+        assert result["ok"] is False and "upload-request" in result["error"]
+        assert stub.sent == []
+    finally:
+        rt_mod.reset()

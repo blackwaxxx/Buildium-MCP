@@ -937,5 +937,5 @@ The most recent write run created these. All carry the `ZZ-MCPTEST-` prefix. Rec
 | `/v1/vendors/categories` | 2485 |
 | `/v1/workorders` | 4518 |
 
-Every created ID is also appended to `test-artifacts.log`.
+Every created ID is also appended to `created-records.log`.
 
