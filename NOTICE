@@ -1,0 +1,29 @@
+buildium-mcp
+Copyright (c) 2026 Jared Cure
+
+This product is licensed under the MIT License (see LICENSE), with the
+following exception.
+
+--------------------------------------------------------------------------
+Bundled OpenAPI document
+--------------------------------------------------------------------------
+
+src/buildium_mcp/specs/buildium-openapi.json is the OpenAPI description of the
+Buildium Open API. It is the property of Buildium, LLC and is redistributed
+here unmodified, solely so that this client can describe the API it calls.
+
+It is NOT covered by this project's MIT license. No ownership of it is claimed,
+and no license to it is granted by this project. If you intend to redistribute
+it yourself, check Buildium's developer terms first.
+
+To use a different copy — a newer revision, or one you obtained directly —
+point BUILDIUM_SPEC_PATH at it; nothing in this project requires the bundled
+file specifically.
+
+--------------------------------------------------------------------------
+Trademarks
+--------------------------------------------------------------------------
+
+"Buildium" is a trademark of Buildium, LLC. This project is unofficial and is
+not affiliated with, endorsed by, or sponsored by Buildium. The name is used
+only to identify the API this client speaks to.

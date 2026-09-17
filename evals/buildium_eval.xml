@@ -1,0 +1,94 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Evaluations for the buildium-mcp server.
+
+  NOT PORTABLE. Read this first.
+
+  The ten answers below were derived from one specific Buildium sandbox's seed
+  data. They will not match yours. Nothing in a fresh clone can re-derive them
+  either: the derivation reads sandbox-snapshot.json, which is gitignored
+  because it is a dump of one account's records.
+
+  Kept in the repository because the *questions* are the reusable part — each
+  deliberately avoids naming the record it targets, so none is answerable by
+  keyword search and each needs several tool calls and a join across resources.
+  Treat this as an illustration of how the server was evaluated, not as a suite
+  you can run. See KNOWN-LIMITATIONS.md.
+
+  Every answer was derived programmatically from a read-only snapshot of the
+  Buildium sandbox — see tests/verify_eval_answers.py, which prints the
+  derivation for each and asserts the uniqueness each question depends on.
+  Regenerate with:
+      .venv/bin/python tests/explore_sandbox.py
+      .venv/bin/python tests/verify_eval_answers.py
+
+  All questions are read-only and independent. They deliberately avoid naming
+  the records they target, so none is answerable by keyword search — each needs
+  several tool calls and a join across resources.
+
+  FIXTURES: this account holds permanent test records whose names begin with
+  ZZ-MCPTEST-, because Buildium offers DELETE on only 14 of its 462 operations.
+  Answers are derived over the genuine portfolio with those excluded, and the
+  questions that count things say so. The server surfaces the same distinction:
+  list tools report fixture_count and take exclude_fixtures, and
+  buildium_lease_roster reports multi_tenant_leases_excluding_fixtures.
+
+  STABILITY CAVEAT: answers still reflect live sandbox contents. Excluding
+  fixtures makes them stable across runs of tests/coverage_writes.py, but a
+  reseed would invalidate them. Re-derive and sync before trusting a score:
+      .venv/bin/python tests/explore_sandbox.py
+      .venv/bin/python tests/verify_eval_answers.py, with the sync flag
+-->
+<evaluation>
+
+  <qa_pair>
+    <question>Several different owners hold the rental properties in this portfolio. One owner holds more properties than any of the others. Looking at the equipment tracked across that owner's properties, exactly one item is meant for outdoor grounds upkeep rather than use inside a home. Which manufacturer made that item?</question>
+    <answer>John Deere</answer>
+  </qa_pair>
+
+  <qa_pair>
+    <question>One outside contractor is assigned to more maintenance jobs than any other. Under which trade classification is that contractor filed? Answer with the classification exactly as it is recorded.</question>
+    <answer>Contractors - General</answer>
+  </qa_pair>
+
+  <qa_pair>
+    <question>One lease that is currently in effect has no monthly rent charge recorded against it, which would be an accounting anomaly worth investigating. Who is the resident on that lease? Answer with first and last name.</question>
+    <answer>Amy Smith</answer>
+  </qa_pair>
+
+  <qa_pair>
+    <question>Across the genuine rental portfolio, how many leases name more than one resident? This account also contains test-fixture records left behind by tooling; exclude those and count only real leases. Answer with a number only.</question>
+    <answer>3</answer>
+  </qa_pair>
+
+  <qa_pair>
+    <question>Nearly all of the managed rental properties sit in the same city, but one is located somewhere else entirely. Name the city that holds only a single property.</question>
+    <answer>New York</answer>
+  </qa_pair>
+
+  <qa_pair>
+    <question>One of the managed properties is not residential — it is not a house, a condo, or an apartment building. Identify the resident on the lease at that property. Answer with first and last name.</question>
+    <answer>Julie Russell</answer>
+  </qa_pair>
+
+  <qa_pair>
+    <question>Take the rental property that contains the greatest number of units. Among the leases at that property which are currently in effect, what is the highest monthly rent? Answer with a whole number, no currency symbol or decimals.</question>
+    <answer>900</answer>
+  </qa_pair>
+
+  <qa_pair>
+    <question>A few leases were created with an end date so distant that it clearly stands in for "no fixed end date" rather than a real expiry. Among the genuine portfolio leases — excluding any test-fixture records left behind by tooling — how many have an end date more than thirty years from now? Answer with a number only.</question>
+    <answer>3</answer>
+  </qa_pair>
+
+  <qa_pair>
+    <question>Group the chart of accounts by accounting classification. Two of those classifications contain exactly four accounts each. One of the two is Equity. Name the other one.</question>
+    <answer>Liability</answer>
+  </qa_pair>
+
+  <qa_pair>
+    <question>Two community associations are managed alongside the rental properties. One of them is located outside Massachusetts. How many bank accounts are named after that association? Answer with a number only.</question>
+    <answer>2</answer>
+  </qa_pair>
+
+</evaluation>

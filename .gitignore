@@ -1,0 +1,38 @@
+# Secrets — never commit
+.env
+.env.eval
+# Local backups of MCP client configs; these contain credentials.
+backup-*.json
+backup-*.yaml
+
+# Virtualenvs
+.venv*/
+venv/
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+
+# Runtime artifacts. Normally these live in the platform state directory; these
+# entries catch the case where BUILDIUM_RUN_LOG points into a checkout.
+run.log
+created-records.log
+test-artifacts.log
+sandbox-snapshot.json
+coverage-raw.json
+
+# Session handover notes. Working documents, not documentation — an earlier
+# version of this project shipped one into a public repo by accident.
+RELEASE-READINESS.md
+REVIEW-PROMPT.md
+
+# Build output
+dist/
+build/
+
+# Editor and OS cruft
+.DS_Store
+.idea/
+.vscode/

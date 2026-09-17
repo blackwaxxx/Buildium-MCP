@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: pip install -e ".[dev]"
+      # No credentials are set. tests/conftest.py isolates the suite from any
+      # .env, so a pass here means the code passed rather than that a sandbox
+      # happened to cooperate.
+      - run: pytest -q
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install build
+      - run: python -m build
+
+      # A unit test cannot prove what hatchling actually archived. The spec is
+      # 2.7MB and lives inside the package precisely so it ships; if it stops
+      # shipping, every pip install fails at startup with "spec not found".
+      - name: The wheel must contain the OpenAPI spec
+        run: |
+          python -m zipfile -l dist/*.whl | grep -q 'buildium_mcp/specs/buildium-openapi.json' \
+            || { echo "::error::spec missing from the wheel"; exit 1; }
+
+      # Install outside the checkout, so nothing resolves against the repo.
+      - name: Clean-room install must start and self-report
+        run: |
+          python -m venv /tmp/clean
+          /tmp/clean/bin/pip install dist/*.whl
+          cd /tmp
+          /tmp/clean/bin/python - <<'PY'
+          from buildium_mcp import server           # must not need credentials
+          health = server.health()
+          assert health["deployment_mode"] == "sandbox", health
+          assert health["operations_indexed"] == 462, health
+          assert "site-packages" in health["spec"], health["spec"]
+          assert "site-packages" not in (health["audit_log"] or ""), health["audit_log"]
+          assert server.list_tags()["ok"] is True    # spec-only tools work uncredentialed
+          print("clean-room OK:", health["spec"])
+          PY
