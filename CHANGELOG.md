@@ -1,6 +1,23 @@
 # Changelog
 
-## 0.1.0 — unreleased
+## 0.1.1 — 2026-09-18
+
+### Changed
+- Claude Desktop extension: the deployment mode is now three on/off toggles
+  ("Connect to production", "Allow changes in production", "Allow file
+  downloads in production") plus one for the write mode, instead of free-text
+  fields. The form has no dropdown, and typing `production-readonly-files` is
+  not a reasonable ask. The bundle's launcher translates the toggles into the
+  same two variables the server has always read; the server is unchanged.
+- The version string has one source (`buildium_mcp.__version__`); the banner
+  and the User-Agent header read it.
+
+### Fixed
+- The extension launcher cleared its environment before reading it, so the
+  credentials from the settings form were discarded. Caught by the bundle
+  smoke test.
+
+## 0.1.0 — 2026-09-17
 
 First public release.
 

@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import sys
 
+from . import __version__
 from .config import DeploymentMode
 from .runtime import StartupStatus
 
@@ -29,7 +30,7 @@ def _line(label: str, value: object) -> str:
     return f" {label:<16}: {value}"
 
 
-def render_banner(status: StartupStatus, *, version: str = "0.1.0") -> str:
+def render_banner(status: StartupStatus, *, version: str = __version__) -> str:
     """Render the banner. Pure — no I/O, no globals."""
     rule = "=" * _WIDTH
     rows = [

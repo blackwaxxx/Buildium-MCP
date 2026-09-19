@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 
 import httpx
 
+from . import __version__
 from .config import (
     PRODUCTION_HOSTS,
     SANDBOX_HOSTS,
@@ -169,7 +170,7 @@ class BuildiumClient:
                 "x-buildium-client-id": config.client_id,
                 "x-buildium-client-secret": config.client_secret,
                 "Accept": "application/json",
-                "User-Agent": "buildium-mcp/0.1",
+                "User-Agent": f"buildium-mcp/{__version__}",
             },
         )
 

@@ -49,10 +49,11 @@ Download `buildium-mcp-<version>.mcpb` from the releases page and double-click
 it (or drag it onto the Claude Desktop window). Claude Desktop asks for your
 Client ID and Client Secret in a settings form, stores them securely, and
 installs everything else itself — including Python, if your machine has none.
-Sandbox is the default; the same form has the deployment mode and base URL
-fields for when you are ready for production. The install dialog labels the
-bundle *unsigned*; that is expected — see [mcpb/](mcpb/) for how the bundle is
-built and why it is not signed.
+Sandbox is the default; the same form has a "Connect to production" toggle for
+when you are ready, and separate toggles for allowing changes and file
+downloads there. The install dialog labels the bundle *unsigned* and says it
+has access to your computer; both are standard for every local extension — see
+[mcpb/](mcpb/) for what this one actually touches and why it is not signed.
 
 ### Any other MCP client
 

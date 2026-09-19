@@ -37,7 +37,6 @@ DIST = ROOT / "dist"
 
 sys.path.insert(0, str(ROOT / "src"))
 
-from buildium_mcp.config import DEFAULT_BASE_URL  # noqa: E402
 
 # One settings form field per environment variable the server reads for
 # configuration. The keys are what Claude Desktop shows the user; the ENV map
@@ -61,47 +60,68 @@ USER_CONFIG: dict[str, dict[str, Any]] = {
         "sensitive": True,
         "required": True,
     },
-    "deployment_mode": {
-        "type": "string",
-        "title": "Deployment mode",
+    # The form has no dropdown, so the deployment mode is three toggles. The
+    # bundle's server/main.py turns them into BUILDIUM_DEPLOYMENT_MODE and
+    # BUILDIUM_BASE_URL; see its docstring for the mapping.
+    "production": {
+        "type": "boolean",
+        "title": "Connect to production",
         "description": (
-            "sandbox (default), production-readonly, production-readonly-files, "
-            "or production-write. Reaching production also needs a production "
-            "Base URL below; neither setting alone is enough."
+            "Off: the Buildium sandbox (a separate account with test data). "
+            "On: your live Buildium account, read-only unless the next toggle "
+            "is also on. Your API key must belong to the environment you pick."
         ),
-        "default": "sandbox",
+        "default": False,
         "required": False,
     },
-    "base_url": {
-        "type": "string",
-        "title": "Base URL",
+    "allow_writes": {
+        "type": "boolean",
+        "title": "Allow changes in production",
         "description": (
-            f"{DEFAULT_BASE_URL} (default) or https://api.buildium.com for "
-            "production. Anything else is refused."
+            "Off: in production, every request that could change a record is "
+            "refused before it leaves your computer. On: Claude can create and "
+            "edit live records. Leave off until you have used read-only for a "
+            "while. Has no effect in the sandbox."
         ),
-        "default": DEFAULT_BASE_URL,
+        "default": False,
         "required": False,
     },
-    "write_mode": {
-        "type": "string",
-        "title": "Write mode",
+    "allow_downloads": {
+        "type": "boolean",
+        "title": "Allow file downloads in production",
         "description": (
-            "fixtures (default): created records must be named with the "
-            "ZZ-MCPTEST- prefix and only records created in this session can be "
-            "changed or deleted. open: unrestricted; deletes still need "
-            "confirm=true."
+            "Buildium issues file downloads as a write-type request, so strict "
+            "read-only cannot fetch a lease PDF. On: permit exactly Buildium's "
+            "seven file-download endpoints and nothing else. Implied when "
+            "changes are allowed. Has no effect in the sandbox."
         ),
-        "default": "fixtures",
+        "default": False,
+        "required": False,
+    },
+    "open_write_mode": {
+        "type": "boolean",
+        "title": "Allow changing records this session did not create",
+        "description": (
+            "Off (recommended for unattended use): new records must be named "
+            "with the ZZ-MCPTEST- prefix, and only records created in this "
+            "session can be edited or deleted. On: any record; deletes still "
+            "need explicit confirmation."
+        ),
+        "default": False,
         "required": False,
     },
 }
 
+# What the server process receives. The two keys go straight through; the
+# toggles arrive under BUILDIUM_MCPB_* names and server/main.py translates
+# them, so the server itself still reads exactly one mode variable.
 ENV: dict[str, str] = {
     "BUILDIUM_CLIENT_ID": "${user_config.client_id}",
     "BUILDIUM_CLIENT_SECRET": "${user_config.client_secret}",
-    "BUILDIUM_DEPLOYMENT_MODE": "${user_config.deployment_mode}",
-    "BUILDIUM_BASE_URL": "${user_config.base_url}",
-    "BUILDIUM_WRITE_MODE": "${user_config.write_mode}",
+    "BUILDIUM_MCPB_PRODUCTION": "${user_config.production}",
+    "BUILDIUM_MCPB_ALLOW_WRITES": "${user_config.allow_writes}",
+    "BUILDIUM_MCPB_ALLOW_DOWNLOADS": "${user_config.allow_downloads}",
+    "BUILDIUM_MCPB_OPEN_WRITE_MODE": "${user_config.open_write_mode}",
 }
 
 ENTRY_POINT = "server/main.py"

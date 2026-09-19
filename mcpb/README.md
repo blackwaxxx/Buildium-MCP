@@ -35,17 +35,38 @@ cannot drift from the code; `tests/test_mcpb.py` pins the parts that matter.
 
 ## Settings form
 
-| Field | Environment variable | Default |
-|---|---|---|
-| Buildium Client ID | `BUILDIUM_CLIENT_ID` | required |
-| Buildium Client Secret | `BUILDIUM_CLIENT_SECRET` | required |
-| Deployment mode | `BUILDIUM_DEPLOYMENT_MODE` | `sandbox` |
-| Base URL | `BUILDIUM_BASE_URL` | `https://apisandbox.buildium.com` |
-| Write mode | `BUILDIUM_WRITE_MODE` | `fixtures` |
+The form has no dropdown — only text, number, on/off toggle, folder and file
+fields — so the deployment mode is expressed as toggles. `server/main.py`
+translates them into the variables the server reads, before the server starts.
+
+| Field | Type | Default | Becomes |
+|---|---|---|---|
+| Buildium Client ID | text, masked | required | `BUILDIUM_CLIENT_ID` |
+| Buildium Client Secret | text, masked | required | `BUILDIUM_CLIENT_SECRET` |
+| Connect to production | toggle | off | `BUILDIUM_BASE_URL` sandbox / production, and the mode below |
+| Allow changes in production | toggle | off | with production on: `production-write` |
+| Allow file downloads in production | toggle | off | with production on and changes off: `production-readonly-files` |
+| Allow changing records this session did not create | toggle | off | `BUILDIUM_WRITE_MODE=open` |
+
+Production on with both other toggles off is `production-readonly`. Every
+toggle off is the sandbox — the same posture a bare `pip install` starts in.
+Reaching live writes still takes two deliberate switches. The server itself is
+unchanged: it still reads exactly one variable to choose its mode, and still
+refuses a production host that variable does not permit; the launcher only sets
+those variables the way an MCP client's `env` block would.
 
 The two secrets are marked `sensitive`, so Claude Desktop masks them and stores
-them in its secure store rather than in a plain file. Every default is the same
-safe posture a `pip install` starts in.
+them in its secure store rather than in a plain file.
+
+## Install-time warning
+
+Claude Desktop tells the user the extension "has access to everything on this
+computer". That text is shown for **every** local extension, whatever its
+manifest says: a local extension is an ordinary program running under the
+user's own account, and the format has no permission model to narrow it. This
+server uses that access for network calls to Buildium, reading a file the user
+asks to upload, writing a file the user asks to download, and its own logs in
+the platform state directory. Nothing else.
 
 ## The bundle is unsigned, on purpose
 
