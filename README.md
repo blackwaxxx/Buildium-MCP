@@ -260,7 +260,7 @@ pytest                                 # offline, no credentials
 .venv/bin/python tests/stdio_check.py               # live sandbox
 ```
 
-The unit suite (340 tests) covers spec indexing, path resolution, response
+The unit suite (348 tests) covers spec indexing, path resolution, response
 shaping, `allOf` flattening, auto-pagination, deprecation handling, error hints,
 and every guardrail branch — all four deployment modes, the download allowlist
 proved exhaustively against the spec, which `.env` files are read and what they
@@ -365,9 +365,21 @@ than `has_more`, caps at 1000 records, and says so explicitly if it truncated:
 
 The cap is about the size of the answer, not the API. A lease record is about
 1.6 KB, so a thousand of them is already far more than an MCP client accepts as
-one tool result. For a larger collection, narrow the query with the tool's
-filters and `fields`, or page by hand with `limit` (up to 1000) and `offset`.
-`buildium_lease_roster` is not bound by it — see above.
+one tool result.
+
+To count, pass `count_only=true` instead. It follows every page, up to 100,000
+records, and returns only the number, so "how many active leases" is one call
+in any account:
+
+```json
+{"ok": true, "count": 4500, "complete": true, "pages_followed": true, "count_only": true}
+```
+
+It is on every list tool and on `buildium_call_endpoint` for any `GET`
+collection, and honours `exclude_fixtures`. For totals or other figures that
+need the records themselves, past 1000 of them, narrow the query with the
+tool's filters and `fields`, or page by hand with `limit` (up to 1000) and
+`offset`. `buildium_lease_roster` is not bound by the cap either — see above.
 
 ### Test fixtures
 

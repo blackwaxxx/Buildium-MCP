@@ -42,19 +42,23 @@ long as any tenant names in the renewal carry the prefix. Fixtures mode is a
 guard against *accidental* damage, not an authorization system. For real work in
 production use `production-write` with `BUILDIUM_WRITE_MODE=open` and mean it.
 
-## `all_pages` returns at most 1000 records
+## `all_pages` returns at most 1000 records, `count_only` counts to 100,000
 
 The list tools and `buildium_call_endpoint` stop following pages at 1000
 records, and report `complete: false` when more remained. The limit is about the
 size of the answer, not the API: a lease record is about 1.6 KB and a tenant
 about 2.5 KB, so a thousand full records is already far more than an MCP client
-accepts as one tool result. An account larger than that needs a narrower query —
-the tools' filters, and `fields` to trim each record — or manual paging with
-`limit` (up to 1000) and `offset`. There is no server-side count yet, so counting
-past 1000 records takes several calls.
+accepts as one tool result.
 
-`buildium_lease_roster` is the exception, because it returns a compact join
-rather than the records. It reads up to 100,000 tenants, reads only one unit
+Counting is not affected: `count_only=true` follows every page, up to 100,000
+records, and returns only the number. What the cap does limit is anything that
+needs the records themselves — a rent total, say — past 1000 of them. That needs
+a narrower query (the tools' filters, and `fields` to trim each record) or
+manual paging with `limit` (up to 1000) and `offset`. There is no server-side
+sum or grouping.
+
+`buildium_lease_roster` is not bound by the cap either, because it returns a
+compact join rather than the records. It reads up to 100,000 tenants, reads only one unit
 when given a lease, and above 300 leases returns counts instead of the
 tenant-by-tenant listing.
 
