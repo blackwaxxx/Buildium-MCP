@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.2.1 — 2026-09-23
+
+### Security
+- Every GitHub Action in CI and in the PyPI release workflow is pinned to a
+  full commit SHA. A tag such as `@v4` can be moved by the action's owner, and
+  these workflows build the released `.mcpb` and publish to PyPI. A test
+  refuses an unpinned `uses:`.
+
+### Changed
+- Every tool parameter carries a description in its JSON schema (85 of them),
+  so a client can show what each one means and the model no longer has to
+  find it in a paragraph of the tool description. Tool descriptions are shorter
+  for it, and an implementation note that had leaked into `buildium_health`'s
+  is gone.
+- The Claude Desktop setting "Allow changes in production" no longer says
+  Claude can edit live records. With the write-mode toggle off it can create
+  prefixed test records and work on those only; editing existing records takes
+  both toggles, and the text now says so.
+- Every startup error says to restart the server after fixing it.
+  Configuration is read once, at startup, so a fix did nothing until then and
+  looked like it had failed.
+
+### Fixed
+- `buildium_call_endpoint` accepts a list as `body`. `POST
+  /v1/customfields/entityType/{entityType}/entityId/{entityId}/values` takes an
+  array and could not be called at all.
+
 ## 0.2.0 — 2026-09-23
 
 ### Security
