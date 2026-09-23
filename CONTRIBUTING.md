@@ -42,6 +42,28 @@ in a checkout and wrong in a wheel. Use `buildium_mcp.paths`.
 **A new deployment mode without updating the enum-iteration tests.** They assert
 exact sets precisely so that a new member cannot inherit permissions silently.
 
+## Releasing
+
+1. Bump `version` in `pyproject.toml` and `__version__` in
+   `src/buildium_mcp/__init__.py`, date the CHANGELOG entry, and merge.
+2. Tag the merge commit (`git tag -a vX.Y.Z -m "buildium-mcp X.Y.Z"`) and push
+   the tag.
+3. Build the wheel and sdist from a clean export of the tag, so nothing
+   untracked in your checkout can end up in them:
+   `mkdir -p /tmp/rel && git archive --prefix=src/ vX.Y.Z | tar -x -C /tmp/rel && python -m build /tmp/rel/src`.
+   Take the `.mcpb` from the `bundle` job of CI's run on the merge commit; it
+   is built with uv, so it carries the lockfile.
+4. Publish a GitHub release for the tag with those three files attached.
+   `.github/workflows/release.yml` then uploads the wheel and sdist to PyPI,
+   byte for byte, after checking they match the tag.
+
+One-time PyPI setup, before the first release: at pypi.org, under Account →
+Publishing, add a pending publisher with project `buildium-mcp`, owner
+`blackwaxxx`, repository `Buildium-MCP`, workflow `release.yml` and environment
+`pypi`. A pending publisher does not reserve the name, so publish soon after.
+For a release that already exists, run the workflow by hand from the Actions
+tab with its tag.
+
 ## Style
 
 Match the surrounding code. Comments explain *why* — the non-obvious constraint,
