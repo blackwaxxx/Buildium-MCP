@@ -1,7 +1,7 @@
 # buildium-mcp
 
 An MCP server for the [Buildium](https://www.buildium.com/) Open API. All **462
-operations** across 42 resource areas, exposed through **19 tools**.
+operations** across 42 resource areas, exposed through **20 tools**.
 
 Sandbox by default. Reaching production takes two deliberate settings, and the
 read-only modes block writes in the transport rather than by policy.
@@ -17,7 +17,7 @@ writes carries its own stated reason.
 > "Buildium" is a trademark of its owner. See [NOTICE](NOTICE) for the
 > provenance of the bundled OpenAPI document.
 
-## Why 19 tools and not 462
+## Why 20 tools and not 462
 
 The Buildium spec is 298 paths, 462 operations, 519 schemas. One-tool-per-operation
 is the obvious approach and it fails at this size — the tool list alone burns tens
@@ -29,13 +29,18 @@ So the spec is indexed at runtime instead:
 ```
 search_endpoints("work orders")      → ranked candidates
 describe_endpoint("POST", "/v1/...") → params + body schema, $refs resolved
-call_endpoint("POST", "/v1/...", …)  → the actual call
+get("/v1/...")                       → any read
+call_endpoint("POST", "/v1/...", …)  → a write
 ```
+
+Reads and writes are separate tools on purpose. `buildium_get` is annotated
+read-only, so a client can approve it once, while `buildium_call_endpoint`
+still asks about every write.
 
 Ten curated shortcuts (`list_leases`, `list_work_orders`, `list_gl_accounts`, …)
 cover frequent reads so routine questions skip the three-step path. Two file
-tools exist because Buildium's file flow cannot be driven through
-`call_endpoint` at all — see below.
+tools exist because Buildium's file flow cannot be driven through the
+gateway at all — see below.
 
 ## Setup
 
@@ -131,8 +136,10 @@ uv venv --python 3.11 && uv pip install -e ".[dev]"
 | `.env` | platform config dir | `BUILDIUM_ENV_FILE`, `BUILDIUM_CONFIG_DIR` |
 | `run.log` (request audit) | platform state dir | `BUILDIUM_RUN_LOG`, `BUILDIUM_STATE_DIR` |
 | `created-records.log` | platform state dir | `BUILDIUM_ARTIFACT_LOG` |
+| downloaded files | `~/Downloads/Buildium` | `BUILDIUM_DOWNLOAD_DIR` |
 
-Set either log variable to `off` to disable it. If the state directory is not
+The logs and downloads are created readable by you only (`0600`). Set either
+log variable to `off` to disable it. If the state directory is not
 writable the server still runs; `buildium_health` reports `audit_log: null`
 with the reason rather than pretending to log.
 
@@ -170,15 +177,18 @@ wheel and in an editable checkout. Nothing is resolved relative to a repo root.
 |---|---|---|
 | Create, payload has a name | every name in it must start with `ZZ-MCPTEST-` | unrestricted |
 | Create, payload has no name | sandbox host only | unrestricted |
+| Create under an existing record | off the sandbox, only under records created this session | unrestricted |
 | Update / delete | only records created this session | unrestricted |
 | Delete | requires `confirm=true` | requires `confirm=true` |
 | Audit | always | always |
 
 `fixtures` is the posture for unattended or agent-driven use: an agent working
-alone cannot update or delete a record it did not create. It does not promise
-that nothing pre-existing is touched, because a create can attach to an existing
-record — a charge posted to an existing lease, or a renewal of one; see
-[KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md). Switch to `open` for real work.
+alone cannot update or delete a record it did not create. Off the sandbox that
+extends to creates under an existing record — a renewal of a lease, a charge or
+a note on it — which must hang off a record created this session. What it does
+not check is a record the payload merely names, such as the `UnitId` of a new
+lease; see [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md). Switch to `open` for
+real work.
 
 `BUILDIUM_FIXTURE_PREFIX` changes the prefix. A blank value means the default,
 since every name starts with an empty string.
@@ -260,7 +270,7 @@ pytest                                 # offline, no credentials
 .venv/bin/python tests/stdio_check.py               # live sandbox
 ```
 
-The unit suite (348 tests) covers spec indexing, path resolution, response
+The unit suite (379 tests) covers spec indexing, path resolution, response
 shaping, `allOf` flattening, auto-pagination, deprecation handling, error hints,
 and every guardrail branch — all four deployment modes, the download allowlist
 proved exhaustively against the spec, which `.env` files are read and what they
@@ -285,8 +295,8 @@ All tools carry a `buildium_` prefix — this server is meant to run alongside
 others, and bare names like `health` would collide.
 
 **Gateway** — `buildium_health`, `buildium_list_tags`, `buildium_search_endpoints`,
-`buildium_describe_endpoint`, `buildium_describe_schema`, `buildium_call_endpoint`,
-`buildium_created_fixtures`
+`buildium_describe_endpoint`, `buildium_describe_schema`, `buildium_get`,
+`buildium_call_endpoint`, `buildium_created_fixtures`
 
 **Files** — `buildium_upload_file`, `buildium_download_file`
 
@@ -319,7 +329,7 @@ Buildium records are fat — an owner carries tax IDs, fax numbers, and mailing
 addresses. Pass `fields` to keep only what you need:
 
 ```json
-{"method": "GET", "path": "/v1/rentals/owners",
+{"path": "/v1/rentals/owners",
  "fields": ["Id", "FirstName", "LastName", "PropertyIds"]}
 ```
 
@@ -337,6 +347,16 @@ neither is a way to POST anywhere else.
 The signed URL points at a third-party host, so the transfer carries **no
 Buildium credentials** — sending the client secret to a host named by an API
 response would leak it wherever that response pointed.
+
+On this machine, downloads go into one folder and nowhere else:
+`~/Downloads/Buildium`, or `BUILDIUM_DOWNLOAD_DIR`, which `buildium_health`
+reports. `save_to` is a name or a path inside it; a path outside it is refused
+before anything is fetched, symlinks included, and an existing file is kept
+unless you pass `overwrite=true`. The reason is prompt injection: text in a work
+order could otherwise have the model save a tenant-uploaded file over
+`~/.zshrc`. For the same reason uploads refuse hidden files and folders
+(`~/.ssh`, `.env`), anything named `*.env`, and this server's own configuration
+and logs.
 
 Note that `buildium_download_file` does not work under `PRODUCTION_READONLY`:
 Buildium models a download request as a POST, and that mode blocks every POST
@@ -375,8 +395,7 @@ in any account:
 {"ok": true, "count": 4500, "complete": true, "pages_followed": true, "count_only": true}
 ```
 
-It is on every list tool and on `buildium_call_endpoint` for any `GET`
-collection, and honours `exclude_fixtures`. For totals or other figures that
+It is on every list tool and on `buildium_get` for any collection, and honours `exclude_fixtures`. For totals or other figures that
 need the records themselves, past 1000 of them, narrow the query with the
 tool's filters and `fields`, or page by hand with `limit` (up to 1000) and
 `offset`. `buildium_lease_roster` is not bound by the cap either — see above.

@@ -175,3 +175,19 @@ def test_apply_rewrites_the_environment_without_losing_anything_else():
     assert env[cfg.MODE_ENV_VAR] == "production-readonly-files"
     assert env["BUILDIUM_BASE_URL"] == "https://api.buildium.com"
     assert launcher.PRODUCTION not in env and launcher.ALLOW_DOWNLOADS not in env
+
+
+def test_the_packer_is_pinned_to_an_exact_version():
+    """`npx --yes @anthropic-ai/mcpb` runs whatever was published last, so a
+    new or compromised packer would change what ships without a commit."""
+    import re
+
+    assert re.fullmatch(r"@anthropic-ai/mcpb@\d+\.\d+\.\d+", build.MCPB_CLI)
+    source = (ROOT / "mcpb" / "build.py").read_text()
+    assert '"@anthropic-ai/mcpb",' not in source, "an unpinned call is back"
+
+
+def test_ci_workflows_default_to_a_read_only_token():
+    for name in ("ci.yml", "release.yml"):
+        text = (ROOT / ".github" / "workflows" / name).read_text()
+        assert "\npermissions:\n  contents: read\n" in text, name

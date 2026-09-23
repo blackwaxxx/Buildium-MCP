@@ -1,8 +1,9 @@
 """Buildium MCP server.
 
 Exposes the whole Buildium API (462 operations) through a small tool surface:
-search -> describe -> call. A handful of curated shortcuts cover the workflows
-that come up constantly, so common questions don't need the three-step dance.
+search -> describe -> get (reads) or call (writes). A handful of curated
+shortcuts cover the workflows that come up constantly, so common questions
+don't need the three-step dance.
 
 Tool names carry a `buildium_` prefix because this server is expected to run
 alongside others; bare names like `health` would collide.
@@ -13,11 +14,14 @@ from __future__ import annotations
 import functools
 import inspect
 import logging
+import mimetypes
+import os
 from pathlib import Path
 from typing import Any
 
 from fastmcp import FastMCP
 
+from . import paths
 from .banner import configure_logging, emit_banner
 from .client import BuildiumError
 from .config import is_download_request_path, is_upload_request_path
@@ -124,6 +128,7 @@ def health() -> dict[str, Any]:
     status = startup_status()
     payload: dict[str, Any] = {"ok": status.ok}
     payload.update(status.as_dict())
+    payload["download_dir"] = str(paths.download_dir())
     if not status.ok:
         payload["stage"] = status.stage
         payload["error"] = status.error
@@ -198,6 +203,37 @@ def describe_schema(name: str) -> dict[str, Any]:
     return {"ok": True, "name": name, "schema": schema}
 
 
+@mcp.tool(name="buildium_get", annotations=READ_ONLY)
+@_guarded
+async def get_endpoint(
+    path: str,
+    query: dict[str, Any] | None = None,
+    fields: list[str] | None = None,
+    all_pages: bool = False,
+    count_only: bool = False,
+) -> dict[str, Any]:
+    """Read any Buildium endpoint (GET). Cannot change anything.
+
+    Use this for every read that has no curated shortcut. It is a separate
+    tool from buildium_call_endpoint so that a client can approve reads once
+    and still ask about each write.
+
+    path:    e.g. "/v1/vendors" or "/v1/leases/12345"
+    query:   query-string parameters
+    fields:  keep only these top-level fields in the response. Buildium records
+             are large — passing e.g. ["Id","Name","PropertyIds"] avoids pulling
+             tax IDs and full addresses you did not ask for.
+    all_pages: follow pagination instead of returning the first page, and
+             return the records, up to 1000. Use it for totals and other
+             aggregates; a figure taken from one page is wrong whenever the
+             collection is larger than the page.
+    count_only: follow every page, up to 100,000 records, and return only how
+             many there are. Use it for "how many" questions.
+    """
+    return await _call(get_runtime(), "GET", path, query, None, fields,
+                       confirm=False, all_pages=all_pages, count_only=count_only)
+
+
 @mcp.tool(name="buildium_call_endpoint", annotations=WRITE_CAPABLE)
 @_guarded
 async def call_endpoint(
@@ -210,31 +246,38 @@ async def call_endpoint(
     all_pages: bool = False,
     count_only: bool = False,
 ) -> dict[str, Any]:
-    """Call any Buildium endpoint.
+    """Call any Buildium endpoint: the tool for writes.
 
-    method:  GET, POST, PUT, PATCH, or DELETE
+    For reads use buildium_get, which is read-only and so can be approved
+    once. GET is still accepted here.
+
+    method:  POST, PUT, PATCH, DELETE (or GET)
     path:    e.g. "/v1/leases" or "/v1/leases/12345"
     query:   query-string parameters
     body:    JSON request body for writes
-    fields:  keep only these top-level fields in the response. Buildium records
-             are large — passing e.g. ["Id","Name","PropertyIds"] avoids pulling
-             tax IDs and full addresses you did not ask for.
+    fields:  keep only these top-level fields in the response
     confirm: required (true) for DELETE
-    all_pages: GET only — follow pagination instead of returning the first
-             page, and return the records, up to 1000. Use it for totals and
-             other aggregates; a figure taken from one page is wrong whenever
-             the collection is larger than the page.
-    count_only: GET only — follow every page, up to 100,000 records, and
-             return only how many there are. Use it for "how many" questions.
+    all_pages, count_only: GET only; see buildium_get.
 
     Write guardrails apply — see buildium_health for the active mode. In the
     default 'fixtures' mode, every name in a create payload must carry the
     fixture prefix, nested ones included; a create whose payload has no name
     field at all is allowed against the sandbox but refused against production,
     since nothing on it could carry the prefix. Updates and deletes only work
-    on records created this session.
+    on records created this session, and off the sandbox so do creates under
+    an existing record, such as a lease renewal.
     """
-    rt = get_runtime()
+    return await _call(get_runtime(), method, path, query, body, fields,
+                       confirm=confirm, all_pages=all_pages, count_only=count_only)
+
+
+async def _call(
+    rt: Runtime, method: str, path: str, query: dict[str, Any] | None,
+    body: dict[str, Any] | None, fields: list[str] | None, *,
+    confirm: bool, all_pages: bool, count_only: bool,
+) -> dict[str, Any]:
+    """What buildium_get and buildium_call_endpoint share: spec lookup, the
+    write guard, pagination, and fixture tracking."""
     resolved = rt.index.resolve_path(method, path)
     if resolved is None:
         return {
@@ -299,6 +342,33 @@ def created_fixtures() -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def _upload_refusal(source: Path) -> str | None:
+    """Why this local file must not be uploaded, or None.
+
+    The upload tool reads any file it is pointed at, and an instruction
+    planted in Buildium data can do the pointing. This refuses the places
+    credentials live: hidden files and folders (~/.ssh, ~/.aws, .env), files
+    named *.env, and this server's own configuration and logs. It is a
+    denylist, so it narrows the risk rather than closing it; KNOWN-LIMITATIONS
+    says so.
+    """
+    resolved = source.resolve()
+    hidden = [part for part in resolved.parts if part.startswith(".")]
+    if hidden:
+        return (f"{hidden[0]!r} is hidden, and hidden files and folders are "
+                "where credentials live (~/.ssh, ~/.aws, .env)")
+    if resolved.suffix.lower() == ".env":
+        return "files named *.env hold credentials"
+    env_files = {c.expanduser().resolve() for c in paths.env_file_candidates()}
+    if resolved in env_files:
+        return "it is one of this server's .env files"
+    for folder in (paths.config_dir(), paths.state_dir()):
+        folder = folder.expanduser().resolve()
+        if resolved.is_relative_to(folder):
+            return f"it is inside {folder}, where this server keeps its own configuration and logs"
+    return None
+
+
 @mcp.tool(name="buildium_upload_file", annotations=WRITE_CAPABLE)
 @_guarded
 async def upload_file(
@@ -314,8 +384,8 @@ async def upload_file(
 
     Bytes do not travel through the Buildium API. Buildium issues a short-lived
     AWS presigned PUT URL, and the file is sent there directly. Doing that by
-    hand with buildium_call_endpoint does not work — call_endpoint would post
-    the metadata and hand you a URL it cannot then PUT to. Use this instead.
+    hand with buildium_call_endpoint does not work — it would post the
+    metadata and hand you a URL it cannot then PUT to. Use this instead.
 
     file_path:   path to the file on this machine
     title:       the file's title in Buildium. In 'fixtures' write mode this
@@ -343,6 +413,11 @@ async def upload_file(
     source = Path(file_path).expanduser()
     if not source.is_file():
         return {"ok": False, "error": f"No file at {source}"}
+    refusal = _upload_refusal(source)
+    if refusal:
+        return {"ok": False,
+                "error": f"Refusing to upload {source}: {refusal}. Copy the file "
+                         "somewhere ordinary first if it really belongs in Buildium."}
 
     metadata: dict[str, Any] = {
         "EntityType": entity_type,
@@ -372,18 +447,74 @@ async def upload_file(
     return {"ok": True, **result, "title": title}
 
 
-@mcp.tool(name="buildium_download_file", annotations=READ_ONLY)
+class _DownloadRefused(ValueError):
+    """The requested save location is outside the download folder."""
+
+
+def _download_target(save_to: str | None, default_name: str) -> Path:
+    """Where to write a download: always inside paths.download_dir().
+
+    A relative save_to is taken relative to that folder, not to the process
+    working directory, which for the Claude Desktop extension is the
+    extension's own install folder. Symlinks are resolved before the check, so
+    a link inside the folder cannot point the write somewhere else.
+    """
+    root = paths.download_dir().expanduser()
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    root = root.resolve()
+    wanted = Path(save_to).expanduser() if save_to else Path(default_name)
+    target = wanted if wanted.is_absolute() else root / wanted
+    if target.is_dir():
+        target = target / default_name
+    target = target.resolve()
+    if not target.is_relative_to(root) or target == root:
+        raise _DownloadRefused(
+            f"{target} is outside the download folder {root}. Downloads are "
+            "confined to that folder so that nothing in Buildium can direct a "
+            "write elsewhere on this machine. Pass a name or a path inside it, "
+            "or set BUILDIUM_DOWNLOAD_DIR to move the folder."
+        )
+    return target
+
+
+def _write_download(target: Path, data: bytes, overwrite: bool) -> None:
+    """Create the file owner-only, refusing to replace one unless asked.
+
+    O_EXCL makes "does it exist" and "create it" a single step, and refuses a
+    symlink sitting at the name as well as a file. O_NOFOLLOW does the same
+    for the final component when overwriting.
+    """
+    target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    flags = os.O_WRONLY | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+    flags |= os.O_TRUNC if overwrite else os.O_EXCL
+    fd = os.open(target, flags, 0o600)
+    paths.make_private(fd)
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(data)
+
+
+def _default_download_name(file_id: int, content_type: str) -> str:
+    base = content_type.split(";", 1)[0].strip().lower()
+    return f"buildium-file-{file_id}{mimetypes.guess_extension(base) or ''}"
+
+
+@mcp.tool(name="buildium_download_file", annotations=WRITE_CAPABLE)
 @_guarded
 async def download_file(
     file_id: int,
-    save_to: str,
+    save_to: str | None = None,
     download_path: str | None = None,
+    overwrite: bool = False,
 ) -> dict[str, Any]:
     """Download a Buildium file to this machine, handling both steps.
 
     Buildium issues a download URL that expires after five minutes and serves
     the bytes from separate storage, so this cannot be done with
-    buildium_call_endpoint.
+    buildium_get.
+
+    Files are written only inside the download folder — ~/Downloads/Buildium
+    unless BUILDIUM_DOWNLOAD_DIR moves it; buildium_health reports where. An
+    existing file is never replaced unless overwrite is true.
 
     Note this is refused when the server runs in production-readonly mode:
     Buildium models a download request as a POST, and that mode blocks every
@@ -391,12 +522,15 @@ async def download_file(
     GET /v1/files/{id} still works.
 
     file_id:       from GET /v1/files
-    save_to:       where to write the file on this machine
+    save_to:       a file name, or a path inside the download folder. Relative
+                   paths are taken relative to that folder. Omit it to save as
+                   buildium-file-<id> with an extension from the content type.
     download_path: for a file belonging to a bill, check, or task history, that
                    resource's own download path, e.g.
                    "/v1/bills/123/files/456/downloadrequest". Only Buildium's
                    seven download-request endpoints are accepted here, in
                    every mode.
+    overwrite:     replace a file that already exists at that name.
     """
     rt = get_runtime()
     path = download_path or f"/v1/files/{file_id}/downloadrequest"
@@ -408,20 +542,34 @@ async def download_file(
             "error": f"{path!r} is not one of Buildium's download-request "
                      "endpoints (…/downloadrequest or …/downloadrequests with "
                      "numeric ids). This tool only fetches files; use "
-                     "buildium_call_endpoint for other requests.",
+                     "buildium_get for other reads.",
         }
+
+    # An explicit location is checked before anything is fetched, so a
+    # refused path costs no request.
+    if save_to:
+        try:
+            _download_target(save_to, _default_download_name(file_id, ""))
+        except _DownloadRefused as exc:
+            return {"ok": False, "error": str(exc)}
+
     try:
         data, content_type = await rt.client.download_file(path)
     except BuildiumError as exc:
         return _err(exc)
 
-    target = Path(save_to).expanduser()
     try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(data)
+        target = _download_target(save_to, _default_download_name(file_id, content_type))
+        _write_download(target, data, overwrite)
+    except _DownloadRefused as exc:
+        return {"ok": False, "error": str(exc)}
+    except FileExistsError:
+        return {"ok": False,
+                "error": f"{target} already exists. Pass overwrite=true to replace "
+                         "it, or choose another name."}
     except OSError as exc:
         return {"ok": False, "error": f"Downloaded {len(data)} bytes but could not "
-                                      f"write {target}: {exc}"}
+                                      f"write them: {exc}"}
     return {"ok": True, "saved_to": str(target), "bytes": len(data),
             "content_type": content_type}
 

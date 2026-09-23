@@ -23,11 +23,17 @@ one. Expect an acknowledgement within a few days.
 - Any way to make `buildium_download_file` or `buildium_upload_file` send a
   request to an endpoint outside `DOWNLOAD_REQUEST_PATHS` /
   `UPLOAD_REQUEST_PATHS`, in any mode.
+- `buildium_download_file` writing outside its download folder, or replacing an
+  existing file without `overwrite=true`.
+- `buildium_upload_file` reading a hidden file, a `*.env` file, or anything in
+  this server's configuration or log folders.
+- `buildium_get` sending anything but a `GET`.
 - Any way to reach a production host without both `BUILDIUM_DEPLOYMENT_MODE`
   and a production `BUILDIUM_BASE_URL`.
 - Credentials appearing in `run.log`, in tool output, in the startup banner, or
   in any request to a non-Buildium host.
-- A `fixtures`-mode update or delete of a record the process did not create.
+- A `fixtures`-mode update or delete of a record the process did not create,
+  or, off the sandbox, a create under one (a `POST` whose path names it).
 - A `.env` file setting anything other than a `BUILDIUM_*` variable, or being
   read from anywhere other than the three locations listed in the README.
 - A blank or missing fixture prefix letting a `fixtures`-mode create through.
@@ -44,13 +50,12 @@ one. Expect an acknowledgement within a few days.
 These are deliberate, documented, and not vulnerabilities on their own. See
 [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md) for the reasoning.
 
-- Fixture-name enforcement inspects five name-like fields, at any depth. A
-  create is judged on its payload, not on the existing record it may attach
-  to, so a renewal of an existing lease passes if its tenant names carry the
-  prefix.
+- Fixture-name enforcement inspects five name-like fields, at any depth.
+  Records a payload merely references (a new lease's `UnitId`, an upload's
+  `EntityId`) are not checked for ownership; records in the path are.
 - The "records created this session" set is in memory only and is empty after a
   restart.
 - `run.log` records request bodies, which for writes include record data.
-- `buildium_upload_file` reads any local file the server process can read, and
-  `buildium_download_file` writes to any local path it can write. The MCP client
-  decides who may call them.
+- `buildium_upload_file` refuses credential locations by denylist, so an
+  ordinary file holding a secret can still be uploaded. The MCP client decides
+  who may call it.

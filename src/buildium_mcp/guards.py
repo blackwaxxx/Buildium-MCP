@@ -16,6 +16,10 @@ Two modes:
       production host they are refused, since the alternative is to create a
       live record this mode has promised to keep identifiable and cannot.
 
+      A create can also hang off an existing record: a renewal of a lease, a
+      charge or a note on it. Off the sandbox, every record named in the path
+      must be one this process created, exactly as for an update.
+
   open — normal operation for when a human is present. All writes are allowed,
       but deletes still require an explicit confirm flag, and everything is
       audited either way.
@@ -31,6 +35,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+from . import paths
 from .config import Config, is_download_request_path, request_permitted
 
 WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
@@ -72,7 +77,7 @@ class FixtureTracker:
         if self.config.artifact_log is None:
             return
         try:
-            with self.config.artifact_log.open("a", encoding="utf-8") as fh:
+            with paths.open_private_append(self.config.artifact_log) as fh:
                 fh.write(json.dumps(entry) + "\n")
         except OSError:
             pass
@@ -164,6 +169,30 @@ def _extract_name(payload: Any) -> str | None:
     return names[0][1] if names else None
 
 
+# How to get past a fixtures-mode refusal, for both kinds of user: the
+# variable for an MCP client's env block, the toggle for the Claude Desktop
+# extension, which has no way to set a variable.
+_OPEN_HINT = (
+    "Set BUILDIUM_WRITE_MODE=open (in the Claude Desktop extension: turn on "
+    "\"Allow changing records this session did not create\")"
+)
+
+
+def _parent_records(path: str) -> list[str]:
+    """The existing records a POST to `path` would add to.
+
+    '/v1/leases/123/renewals' -> ['/v1/leases/123']. Each is a path that
+    FixtureTracker.owns understands, so the question "did we create it" is
+    answered the same way as for an update.
+    """
+    parts = [p for p in path.split("?", 1)[0].strip("/").split("/") if p]
+    return [
+        "/" + "/".join(parts[: i + 1])
+        for i, part in enumerate(parts)
+        if part.isdigit()
+    ]
+
+
 def write_mode() -> str:
     mode = os.getenv("BUILDIUM_WRITE_MODE", "fixtures").strip().lower()
     return mode if mode in ("fixtures", "open") else "fixtures"
@@ -226,6 +255,23 @@ def check_write(
                 "BUILDIUM_FIXTURE_PREFIX to a non-blank value."
             )
 
+        # A renewal of a lease, a charge on it, a note on it: each changes a
+        # record as surely as a PUT does, while carrying a perfectly good
+        # prefixed name. Off the sandbox that record must be ours. In the
+        # sandbox it may be anything, for the same reason nameless creates
+        # are allowed there: the data is disposable.
+        if not tracker.config.is_sandbox:
+            for parent in _parent_records(path):
+                if not tracker.owns(parent):
+                    raise GuardViolation(
+                        f"POST {path} refused in 'fixtures' mode: it adds to "
+                        f"{parent}, which this process did not create, and on "
+                        f"{tracker.config.host} that changes a live record. "
+                        "Records created earlier in this run are listed by "
+                        f"buildium_created_fixtures. {_OPEN_HINT} to work on "
+                        "existing records."
+                    )
+
         # Every label on the payload, not just the top-level one: creating a
         # lease creates its tenants, and an unprefixed tenant is exactly the
         # untagged record this mode exists to prevent.
@@ -236,7 +282,7 @@ def check_write(
                     f"POST {path} refused in 'fixtures' mode: {field_path} is "
                     f"{name!r}, which must start with {prefix!r} so test data "
                     "stays identifiable and removable. Either prefix it, or "
-                    "set BUILDIUM_WRITE_MODE=open to create real records."
+                    f"{_OPEN_HINT} to create real records."
                 )
 
         # Either nothing on this payload can carry the prefix, or the payload
@@ -260,8 +306,8 @@ def check_write(
                 "have no name field at all: charges, payments, journal entries, "
                 "checks, notes. Against the sandbox those are allowed because "
                 "the data is disposable, but this server is pointed at "
-                f"{tracker.config.host}. Set BUILDIUM_WRITE_MODE=open to create "
-                "live records deliberately, and expect to clean up by hand."
+                f"{tracker.config.host}. {_OPEN_HINT} to create live records "
+                "deliberately, and expect to clean up by hand."
             )
         return
 
@@ -271,5 +317,5 @@ def check_write(
             f"{method} {path} refused in 'fixtures' mode: this process did not "
             "create that record, so it will not modify or delete it. Records "
             "created earlier in this run are listed by buildium_created_fixtures. "
-            "Set BUILDIUM_WRITE_MODE=open to operate on pre-existing records."
+            f"{_OPEN_HINT} to operate on pre-existing records."
         )

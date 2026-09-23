@@ -224,6 +224,7 @@ def test_nameless_create_refused_against_production(tmp_path):
     create live untagged records."""
     t = FixtureTracker(_conf(tmp_path, cfg.DeploymentMode.PRODUCTION_WRITE,
                              base_url="https://api.buildium.com"))
+    t.record("/v1/leases", 1)  # our own lease, so only the missing name is at issue
     with pytest.raises(GuardViolation, match="no name field"):
         check_write("POST", "/v1/leases/1/payments", PAYMENT, t)
 
@@ -264,6 +265,7 @@ def test_a_nameless_production_create_is_still_refused_near_a_download_path(tmp_
     """The carve-out is the seven templates, not anything download-shaped."""
     t = FixtureTracker(_conf(tmp_path, cfg.DeploymentMode.PRODUCTION_WRITE,
                              base_url="https://api.buildium.com"))
+    t.record("/v1/files", 5)  # so the parent check is not what refuses it
     with pytest.raises(GuardViolation, match="no name field"):
         check_write("POST", "/v1/files/5/downloadrequest/extra", None, t)
 
@@ -1601,7 +1603,7 @@ def test_guarded_decorator_does_not_alter_any_tool_schema():
     from buildium_mcp import server as server_mod
 
     tools = asyncio.run(server_mod.mcp.list_tools())
-    assert len(tools) == 19, f"expected 19 tools, found {len(tools)}"
+    assert len(tools) == 20, f"expected 20 tools, found {len(tools)}"
 
     for tool in tools:
         schema = tool.parameters
@@ -2330,6 +2332,315 @@ def test_every_tool_that_pages_can_also_count():
 
     tools = asyncio.run(server_mod.mcp.list_tools())
     paging = [t for t in tools if "all_pages" in t.parameters.get("properties", {})]
-    assert len(paging) == 8
+    assert len(paging) == 9
     for tool in paging:
         assert "count_only" in tool.parameters["properties"], tool.name
+
+
+# -- downloads are confined to one folder ----------------------------------------
+
+
+@pytest.fixture
+def file_runtime(tmp_path, monkeypatch):
+    """A live runtime whose file transfers are fakes that record their calls."""
+    from buildium_mcp import runtime as rt_mod
+
+    monkeypatch.setenv("BUILDIUM_CLIENT_ID", "x")
+    monkeypatch.setenv("BUILDIUM_CLIENT_SECRET", "y")
+    monkeypatch.setenv("BUILDIUM_DOWNLOAD_DIR", str(tmp_path / "dl"))
+    rt_mod.reset()
+    rt = rt_mod.get_runtime()
+    calls: list[tuple] = []
+
+    async def fake_download(path):
+        calls.append(("download", path))
+        return b"%PDF-bytes", "application/pdf"
+
+    async def fake_upload(path, metadata, data, name):
+        calls.append(("upload", path, metadata["Title"]))
+        return {"storage_status": 200, "bytes_sent": len(data)}
+
+    monkeypatch.setattr(rt.client, "download_file", fake_download)
+    monkeypatch.setattr(rt.client, "upload_file", fake_upload)
+    yield tmp_path, calls
+    rt_mod.reset()
+
+
+def _mode(path):
+    import stat
+    return stat.S_IMODE(path.stat().st_mode)
+
+
+def test_download_is_not_annotated_read_only():
+    """It POSTs and writes to disk. A client that auto-approves read-only
+    tools must still ask about it."""
+    from buildium_mcp import server as server_mod
+
+    tools = {t.name: t for t in asyncio.run(server_mod.mcp.list_tools())}
+    assert tools["buildium_download_file"].annotations.read_only_hint is False
+
+
+async def test_download_defaults_into_the_download_folder(file_runtime):
+    from buildium_mcp import server as server_mod
+
+    tmp, _ = file_runtime
+    result = await server_mod.download_file(5)
+    saved = Path(result["saved_to"])
+    assert result["ok"] is True
+    assert saved == (tmp / "dl" / "buildium-file-5.pdf").resolve()
+    assert saved.read_bytes() == b"%PDF-bytes"
+    if sys.platform != "win32":
+        assert _mode(saved) == 0o600
+
+
+async def test_a_relative_save_to_is_inside_the_folder_not_the_cwd(file_runtime, monkeypatch):
+    """The extension's working directory is its own install folder."""
+    from buildium_mcp import server as server_mod
+
+    tmp, _ = file_runtime
+    monkeypatch.chdir(tmp)
+    result = await server_mod.download_file(5, save_to="leases/unit-4.pdf")
+    assert Path(result["saved_to"]) == (tmp / "dl" / "leases" / "unit-4.pdf").resolve()
+    assert not (tmp / "leases").exists()
+
+
+@pytest.mark.parametrize("where", ["absolute", "dotdot"])
+async def test_a_path_outside_the_folder_is_refused_before_any_request(file_runtime, where):
+    """~/.zshrc, a LaunchAgent: anywhere a file a tenant uploaded could be
+    turned into code that runs."""
+    from buildium_mcp import server as server_mod
+
+    tmp, calls = file_runtime
+    target = str(tmp / ".zshrc") if where == "absolute" else "../.zshrc"
+    result = await server_mod.download_file(5, save_to=target)
+    assert result["ok"] is False and "outside the download folder" in result["error"]
+    assert calls == [], "a refused path must not cost a request"
+    assert not (tmp / ".zshrc").exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges on Windows")
+async def test_a_symlink_cannot_carry_the_write_out_of_the_folder(file_runtime):
+    from buildium_mcp import server as server_mod
+
+    tmp, _ = file_runtime
+    (tmp / "dl").mkdir()
+    (tmp / "elsewhere").mkdir()
+    (tmp / "dl" / "escape").symlink_to(tmp / "elsewhere")
+    (tmp / "dl" / "target.pdf").symlink_to(tmp / "elsewhere" / "victim.pdf")
+
+    for save_to, overwrite in (("escape/x.pdf", False), ("target.pdf", True)):
+        result = await server_mod.download_file(5, save_to=save_to, overwrite=overwrite)
+        assert result["ok"] is False and "outside the download folder" in result["error"]
+    assert list((tmp / "elsewhere").iterdir()) == []
+
+
+async def test_an_existing_file_is_only_replaced_when_asked(file_runtime):
+    from buildium_mcp import server as server_mod
+
+    tmp, _ = file_runtime
+    existing = tmp / "dl" / "lease.pdf"
+    existing.parent.mkdir()
+    existing.write_bytes(b"keep me")
+
+    result = await server_mod.download_file(5, save_to="lease.pdf")
+    assert result["ok"] is False and "overwrite=true" in result["error"]
+    assert existing.read_bytes() == b"keep me"
+
+    result = await server_mod.download_file(5, save_to="lease.pdf", overwrite=True)
+    assert result["ok"] is True and existing.read_bytes() == b"%PDF-bytes"
+
+
+async def test_save_to_a_folder_puts_the_file_inside_it(file_runtime):
+    from buildium_mcp import server as server_mod
+
+    tmp, _ = file_runtime
+    (tmp / "dl" / "bills").mkdir(parents=True)
+    result = await server_mod.download_file(9, save_to="bills")
+    assert Path(result["saved_to"]) == (tmp / "dl" / "bills" / "buildium-file-9.pdf").resolve()
+
+
+def test_health_reports_the_download_folder(tmp_path, monkeypatch):
+    from buildium_mcp import server as server_mod
+
+    monkeypatch.setenv("BUILDIUM_DOWNLOAD_DIR", str(tmp_path / "somewhere"))
+    assert server_mod.health()["download_dir"] == str(tmp_path / "somewhere")
+
+
+# -- uploads refuse the places credentials live -----------------------------------
+
+
+@pytest.mark.parametrize("relative", [".ssh/id_rsa", "project/.env", "keys/prod.env"])
+async def test_upload_refuses_credential_shaped_files(file_runtime, relative):
+    """An instruction planted in Buildium data could otherwise have the
+    server upload ~/.ssh/id_rsa, or its own .env, to someone's account."""
+    from buildium_mcp import server as server_mod
+
+    tmp, calls = file_runtime
+    source = tmp / relative
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text("secret")
+    result = await server_mod.upload_file(str(source), "ZZ-MCPTEST-x", 1)
+    assert result["ok"] is False and "Refusing to upload" in result["error"]
+    assert calls == []
+
+
+@pytest.mark.parametrize("folder_var", ["BUILDIUM_CONFIG_DIR", "BUILDIUM_STATE_DIR"])
+async def test_upload_refuses_this_servers_own_files(file_runtime, monkeypatch, folder_var):
+    from buildium_mcp import server as server_mod
+
+    tmp, calls = file_runtime
+    folder = tmp / "own"
+    folder.mkdir()
+    (folder / "run.log").write_text("audit")
+    monkeypatch.setenv(folder_var, str(folder))
+    result = await server_mod.upload_file(str(folder / "run.log"), "ZZ-MCPTEST-x", 1)
+    assert result["ok"] is False and "its own configuration and logs" in result["error"]
+    assert calls == []
+
+
+async def test_upload_of_an_ordinary_file_goes_ahead(file_runtime):
+    from buildium_mcp import server as server_mod
+
+    tmp, calls = file_runtime
+    source = tmp / "Documents" / "lease.pdf"
+    source.parent.mkdir()
+    source.write_bytes(b"%PDF")
+    result = await server_mod.upload_file(str(source), "ZZ-MCPTEST-lease", 1)
+    assert result["ok"] is True
+    assert calls == [("upload", "/v1/files/uploads", "ZZ-MCPTEST-lease")]
+
+
+# -- a create under an existing record needs that record to be ours ---------------
+
+
+def _production_tracker(tmp_path):
+    return FixtureTracker(_conf(tmp_path, cfg.DeploymentMode.PRODUCTION_WRITE,
+                                base_url="https://api.buildium.com"))
+
+
+RENEWAL = {"LeaseType": "Fixed", "Tenants": [{"FirstName": "ZZ-MCPTEST-Dana"}]}
+
+
+def test_renewing_a_live_lease_is_refused_despite_prefixed_names(tmp_path):
+    """The gap KNOWN-LIMITATIONS used to describe: every name carried the
+    prefix, and a real lease was renewed anyway."""
+    with pytest.raises(GuardViolation, match=r"adds to /v1/leases/123"):
+        check_write("POST", "/v1/leases/123/renewals", RENEWAL, _production_tracker(tmp_path))
+
+
+def test_renewing_a_lease_this_process_created_is_allowed(tmp_path):
+    t = _production_tracker(tmp_path)
+    t.record("/v1/leases", 123)
+    check_write("POST", "/v1/leases/123/renewals", RENEWAL, t)
+
+
+def test_every_parent_in_the_path_must_be_ours(tmp_path):
+    t = _production_tracker(tmp_path)
+    t.record("/v1/bankaccounts", 5)
+    with pytest.raises(GuardViolation, match=r"adds to /v1/bankaccounts/5/checks/9"):
+        check_write("POST", "/v1/bankaccounts/5/checks/9/files/uploads",
+                    {"Title": "ZZ-MCPTEST-scan"}, t)
+
+
+def test_the_sandbox_still_allows_creates_under_existing_records(tracker):
+    check_write("POST", "/v1/leases/123/renewals", RENEWAL, tracker)
+
+
+def test_a_download_request_under_existing_records_is_still_allowed(tmp_path):
+    """Fetching a file changes nothing, whoever created the bill it hangs off."""
+    check_write("POST", "/v1/bills/1/files/2/downloadrequest", None,
+                _production_tracker(tmp_path))
+
+
+def test_parent_records_lists_every_numbered_segment():
+    from buildium_mcp.guards import _parent_records
+
+    assert _parent_records("/v1/leases") == []
+    assert _parent_records("/v1/leases/123/renewals") == ["/v1/leases/123"]
+    assert _parent_records("v1/bankaccounts/5/checks/9/files/uploads?x=1") == [
+        "/v1/bankaccounts/5", "/v1/bankaccounts/5/checks/9",
+    ]
+
+
+def test_fixtures_refusals_tell_extension_users_which_toggle_to_use(tmp_path):
+    with pytest.raises(GuardViolation, match="Allow changing records this session did not create"):
+        check_write("PUT", "/v1/leases/1", {}, _production_tracker(tmp_path))
+
+
+# -- logs are owner-only ------------------------------------------------------------
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permissions")
+def test_audit_logs_are_created_owner_only(tmp_path):
+    log = tmp_path / "run.log"
+    with paths.open_private_append(log) as fh:
+        fh.write("x\n")
+    assert _mode(log) == 0o600
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permissions")
+def test_a_readable_log_from_an_older_version_is_tightened(tmp_path):
+    log = tmp_path / "run.log"
+    log.write_text("old\n")
+    log.chmod(0o644)
+    with paths.open_private_append(log) as fh:
+        fh.write("new\n")
+    assert _mode(log) == 0o600
+    assert log.read_text() == "old\nnew\n"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permissions")
+def test_a_new_state_dir_is_owner_only(tmp_path, monkeypatch):
+    monkeypatch.setenv("BUILDIUM_STATE_DIR", str(tmp_path / "fresh"))
+    paths.resolve_log_paths()
+    assert _mode(tmp_path / "fresh") == 0o700
+
+
+async def test_the_audit_trail_is_written_owner_only(tmp_path):
+    """Through the real write sites, not just the helper."""
+    client = BuildiumClient(_conf(tmp_path, cfg.DeploymentMode.SANDBOX))
+    client._client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json={"Id": 7})),
+        base_url="https://apisandbox.buildium.com",
+    )
+    await client.request("GET", "/v1/rentals/7")
+    FixtureTracker(client.config).record("/v1/vendors", 7, {"Name": "ZZ-MCPTEST-v"})
+    await client.aclose()
+    if sys.platform != "win32":
+        assert _mode(tmp_path / "run.log") == 0o600
+        assert _mode(tmp_path / "artifacts.log") == 0o600
+
+
+# -- reads have their own read-only tool --------------------------------------------
+
+
+def test_reads_and_writes_are_separate_tools():
+    """So a client can approve reads once and still ask about each write."""
+    from buildium_mcp import server as server_mod
+
+    tools = {t.name: t for t in asyncio.run(server_mod.mcp.list_tools())}
+    get, call = tools["buildium_get"], tools["buildium_call_endpoint"]
+    assert get.annotations.read_only_hint is True
+    assert call.annotations.read_only_hint is False
+    props = set(get.parameters["properties"])
+    assert {"method", "body", "confirm"}.isdisjoint(props), "buildium_get must not be able to write"
+    assert {"path", "query", "fields", "all_pages", "count_only"} <= props
+
+
+async def test_buildium_get_reads(counting_runtime):
+    from buildium_mcp import server as server_mod
+
+    transport = counting_runtime(7)
+    result = await server_mod.get_endpoint("/v1/vendors", query={"limit": 5}, fields=["Id"])
+    assert result["ok"] is True and result["data"] == [{"Id": i} for i in range(5)]
+    assert (await server_mod.get_endpoint("/v1/vendors", count_only=True))["count"] == 7
+    assert transport.requests[0]["limit"] == "5"
+
+
+async def test_buildium_get_rejects_a_path_outside_the_spec(counting_runtime):
+    from buildium_mcp import server as server_mod
+
+    transport = counting_runtime(1)
+    result = await server_mod.get_endpoint("/v1/not-a-thing")
+    assert result["ok"] is False and "not in the Buildium spec" in result["error"]
+    assert transport.requests == []

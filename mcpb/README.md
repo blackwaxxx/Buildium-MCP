@@ -19,8 +19,8 @@ package source, the dependency list, a five-line entry script and an icon.
 .venv/bin/python mcpb/smoke.py --with-env   # same, forwarding your BUILDIUM_* credentials
 ```
 
-`build.py` needs Node for `npx @anthropic-ai/mcpb pack`, and uv on PATH to write
-a lockfile (optional). `manifest.json` and the bundle's `pyproject.toml` are
+`build.py` needs Node for `npx @anthropic-ai/mcpb pack` (the version is pinned by
+`MCPB_CLI` in `build.py`), and uv on PATH to write a lockfile (optional). `manifest.json` and the bundle's `pyproject.toml` are
 generated from the project's `pyproject.toml` and the live tool list, so they
 cannot drift from the code; `tests/test_mcpb.py` pins the parts that matter.
 
@@ -65,8 +65,9 @@ computer". That text is shown for **every** local extension, whatever its
 manifest says: a local extension is an ordinary program running under the
 user's own account, and the format has no permission model to narrow it. This
 server uses that access for network calls to Buildium, reading a file the user
-asks to upload, writing a file the user asks to download, and its own logs in
-the platform state directory. Nothing else.
+asks to upload (never a hidden file, a `.env`, or its own configuration),
+writing downloads into `~/Downloads/Buildium` and nowhere else, and its own logs
+in the platform state directory. Nothing else.
 
 ## The bundle is unsigned, on purpose
 

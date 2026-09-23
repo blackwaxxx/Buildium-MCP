@@ -3,7 +3,7 @@
 Why this server is shaped the way it is. For what it *does*, see the README;
 for what it deliberately does not do, see [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md).
 
-## 19 tools, not 462
+## 20 tools, not 462
 
 One tool per operation is the obvious design and it fails at this size. The
 Buildium spec is 298 paths, 462 operations, 519 schemas; the tool list alone
@@ -15,12 +15,16 @@ So the spec is indexed at runtime and navigated in three steps:
 ```
 search_endpoints("work orders")      → ranked candidates
 describe_endpoint("POST", "/v1/...") → params + body schema, $refs resolved
-call_endpoint("POST", "/v1/...", …)  → the actual call
+get("/v1/...") / call_endpoint(…)    → the actual read / write
 ```
+
+The last step is two tools, not one, so that read-only annotations can mean
+something: a client can approve `buildium_get` once and still be asked about
+each write through `buildium_call_endpoint`.
 
 Ten curated shortcuts cover the reads that come up constantly, so routine
 questions skip the dance. Two file tools exist because Buildium's file flow
-cannot be expressed through `call_endpoint` at all.
+cannot be expressed through the gateway at all.
 
 Indexing the whole 2.7MB document costs about 20ms at startup, so nothing here
 is lazy for performance reasons. `$ref` resolution *is* on demand, capped at
@@ -30,14 +34,14 @@ enormous and circular.
 ## Layers
 
 ```
-server.py    19 @mcp.tool functions; no logic beyond shaping a response
+server.py    20 @mcp.tool functions; no logic beyond shaping a response
 runtime.py   staged, deferred startup; the only place tools get their state
 config.py    modes, host allowlist, the download allowlist, the one decision fn
 client.py    HTTP, auth, retries, pagination, the transport guard
 guards.py    write-mode enforcement and the fixture tracker
 spec.py      OpenAPI indexing, search, $ref resolution
 shaping.py   pure response projection and fixture partitioning
-paths.py     where .env, the spec, and the logs live
+paths.py     where .env, the spec, the logs and downloads live
 banner.py    the startup banner (pure render + an emit)
 ```
 

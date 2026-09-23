@@ -34,13 +34,20 @@ The same goes for a payload too large or too deeply nested to scan in full. A
 blank `BUILDIUM_FIXTURE_PREFIX` falls back to the default rather than matching
 every name.
 
-**What the mode does not check is where a create lands.** A `POST` to a
-sub-resource of an existing record is judged on its payload alone. In the
-sandbox that lets a nameless charge be posted to an existing lease. In
-production it lets `POST /v1/leases/{leaseId}/renewals` renew a real lease, as
-long as any tenant names in the renewal carry the prefix. Fixtures mode is a
-guard against *accidental* damage, not an authorization system. For real work in
-production use `production-write` with `BUILDIUM_WRITE_MODE=open` and mean it.
+A create under an existing record — `POST /v1/leases/{leaseId}/renewals`, a
+charge or a note on a lease — changes that record, so off the sandbox every
+record named in the path must be one this process created, as for an update.
+In the sandbox it may be any record, because the data is disposable.
+
+**What the mode does not check is a record the payload names.** A new lease
+carries the `UnitId` of an existing unit; an upload to `/v1/files/uploads`
+carries the `EntityId` it attaches to. Those references are everywhere in
+Buildium's write bodies (units, properties, GL accounts, vendors), and most
+point at records no test would ever create, so they are not checked. In
+production, a prefixed lease can therefore be created on a real unit, and a
+prefixed file attached to a real record. Fixtures mode is a guard against
+*accidental* damage, not an authorization system. For real work in production
+use `production-write` with `BUILDIUM_WRITE_MODE=open` and mean it.
 
 ## `all_pages` returns at most 1000 records, `count_only` counts to 100,000
 
@@ -78,11 +85,19 @@ that uploads and then immediately lists files may not see the new record.
 
 ## The file tools touch the local filesystem
 
-`buildium_upload_file` reads whatever local path it is given, and
-`buildium_download_file` writes wherever it is told to. That is what they are
-for, but it means a client that grants them is granting file access on the
-machine the server runs on. Both are confined to Buildium's file endpoints on
-the network side; there is no equivalent confinement on the local side.
+`buildium_download_file` writes only inside one folder, `~/Downloads/Buildium`
+unless `BUILDIUM_DOWNLOAD_DIR` moves it. Paths outside it are refused, symlinks
+are resolved before the check, and an existing file is replaced only with
+`overwrite=true`. That confinement is structural.
+
+`buildium_upload_file` is not confined the same way, because uploading a file
+from wherever it lives is the point of the tool. It refuses the places
+credentials live: hidden files and folders (`~/.ssh`, `~/.aws`, any `.env`),
+files named `*.env`, and this server's own configuration and log folders. That
+is a denylist, so it narrows the risk rather than closing it: a secret in an
+ordinary file in `~/Documents` can still be uploaded. Both tools are confined
+to Buildium's file endpoints on the network side, and the MCP client decides who
+may call them.
 
 ## Sandbox records cannot be cleaned up
 
@@ -95,8 +110,9 @@ present — a count is never silently wrong, but it may need the flag.
 
 `run.log` gets one JSON line per request and is never rotated. It records
 request bodies, which for writes include record data — tenant names, amounts.
-It does **not** record credentials. Set `BUILDIUM_RUN_LOG=off` if that is not
-the trade you want.
+It does **not** record credentials. It is created readable by its owner only,
+and a log left readable by an older version is tightened on the next write.
+Set `BUILDIUM_RUN_LOG=off` if that is not the trade you want.
 
 ## Coverage is uneven between reads and writes
 

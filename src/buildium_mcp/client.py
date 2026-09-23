@@ -19,7 +19,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from . import __version__
+from . import __version__, paths
 from .config import (
     PRODUCTION_HOSTS,
     SANDBOX_HOSTS,
@@ -191,7 +191,7 @@ class BuildiumClient:
             return
         record["ts"] = datetime.now(timezone.utc).isoformat()
         try:
-            with self.config.run_log.open("a", encoding="utf-8") as fh:
+            with paths.open_private_append(self.config.run_log) as fh:
                 fh.write(json.dumps(record, default=str) + "\n")
         except OSError:
             # An audit failure must not take down the call it was recording.
@@ -506,7 +506,7 @@ class BuildiumClient:
         if status == 404:
             return BuildiumError(
                 f"{base}: not found. Either the record does not exist or the "
-                f"path is wrong — use search_endpoints to confirm. {detail}",
+                f"path is wrong — use buildium_search_endpoints to confirm. {detail}",
                 status=status,
                 payload=data,
             )
@@ -517,7 +517,7 @@ class BuildiumClient:
                 hint_text += f" Hint: {DATE_RANGE_CAP_HINT}"
             return BuildiumError(
                 f"{base}: request validation failed. {detail}{hint_text} "
-                "Call describe_endpoint to see required fields and types.",
+                "Call buildium_describe_endpoint to see required fields and types.",
                 status=status,
                 payload=data,
             )
@@ -546,7 +546,7 @@ def _confined(path: str, allowed, purpose: str) -> str:
             f"{path} is not a Buildium {purpose}-request endpoint, so "
             f"{purpose}_file will not POST to it. This helper is confined to the "
             f"seven {purpose} endpoints in every deployment mode; for anything "
-            "else use call_endpoint, which applies the write guardrails.",
+            "else use buildium_call_endpoint, which applies the write guardrails.",
             status=None,
         )
     return path

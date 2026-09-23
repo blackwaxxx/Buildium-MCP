@@ -23,8 +23,9 @@ from __future__ import annotations
 import os
 from importlib import resources
 from pathlib import Path
+from typing import IO
 
-from platformdirs import user_config_dir, user_state_dir
+from platformdirs import user_config_dir, user_downloads_dir, user_state_dir
 
 APP_NAME = "buildium-mcp"
 
@@ -55,6 +56,43 @@ def state_dir() -> Path:
     if override is not None:
         return override
     return Path(user_state_dir(APP_NAME, appauthor=False))
+
+
+def download_dir() -> Path:
+    """The one folder buildium_download_file may write into.
+
+    The tool used to write wherever it was told. A file a tenant uploaded
+    through the portal, plus an instruction planted in a work order, was then
+    enough to overwrite ~/.zshrc or drop a LaunchAgent. Confining writes to a
+    single folder is the structural fix; BUILDIUM_DOWNLOAD_DIR moves it.
+    """
+    override = _env_path("BUILDIUM_DOWNLOAD_DIR")
+    if override is not None:
+        return override
+    return Path(user_downloads_dir()) / "Buildium"
+
+
+def open_private_append(path: Path) -> IO[str]:
+    """Open a log for appending, readable and writable by its owner only.
+
+    The audit log records request bodies — tenant names, amounts — and was
+    created 0644 under the umask. On macOS the enclosing ~/Library is private
+    anyway; on Linux ~/.local/state usually is not, so other local users could
+    read it. A file an earlier version created is tightened here too.
+    """
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    make_private(fd)
+    return os.fdopen(fd, "a", encoding="utf-8")
+
+
+def make_private(fd: int) -> None:
+    """Drop group and other permissions from an open file, where POSIX
+    permissions exist. Windows has none to tighten."""
+    try:
+        if os.fstat(fd).st_mode & 0o077:
+            os.fchmod(fd, 0o600)
+    except (AttributeError, NotImplementedError, OSError):
+        pass
 
 
 def packaged_spec_path() -> Path:
@@ -156,7 +194,9 @@ def resolve_log_paths() -> tuple[Path | None, Path | None, str | None]:
 
     directory = state_dir()
     try:
-        directory.mkdir(parents=True, exist_ok=True)
+        # 0o700 applies only if this call creates it; a directory the
+        # user chose already has the permissions they gave it.
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     except OSError as exc:
         return None, None, f"cannot create {directory}: {exc.strerror or exc}"
 
