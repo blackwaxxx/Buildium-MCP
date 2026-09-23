@@ -50,6 +50,11 @@ translates them into the variables the server reads, before the server starts.
 
 Production on with both other toggles off is `production-readonly`. Every
 toggle off is the sandbox — the same posture a bare `pip install` starts in.
+
+"Allow changes in production" on its own is deliberately limited: with the
+last toggle off, the write mode is `fixtures`, so Claude can create prefixed
+test records and work on those, but cannot edit or add to anything that already
+existed. Real work on live records takes both toggles.
 Reaching live writes still takes two deliberate switches. The server itself is
 unchanged: it still reads exactly one variable to choose its mode, and still
 refuses a production host that variable does not permit; the launcher only sets

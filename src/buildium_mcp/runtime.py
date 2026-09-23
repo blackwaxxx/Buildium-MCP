@@ -41,12 +41,25 @@ from .guards import FixtureTracker, write_mode
 from .spec import SpecIndex, load_index
 
 
+# Startup is memoized, failure included, so fixing the configuration changes
+# nothing until the process starts again. Every remedy has to say so, or the
+# natural reading of "still broken after I fixed it" is that the fix was wrong.
+RESTART_NOTE = (
+    "Then restart the server: it reads its configuration once, when it starts. "
+    "In Claude Desktop, turn the extension off and on again."
+)
+
+
+def _with_restart(remedy: str) -> str:
+    return remedy if "restart" in remedy.lower() else f"{remedy.rstrip()} {RESTART_NOTE}"
+
+
 class StartupError(RuntimeError):
     """Configuration is incomplete. Carries the fix, not just the complaint."""
 
     def __init__(self, message: str, *, remedy: str, stage: str):
         super().__init__(message)
-        self.remedy = remedy
+        self.remedy = _with_restart(remedy)
         self.stage = stage
 
 
@@ -126,7 +139,7 @@ def get_runtime() -> Runtime:
             raise StartupError(
                 f"Could not load configuration: {type(exc).__name__}: {exc}",
                 remedy="Check that every .env listed by buildium_health is "
-                       "readable, then restart the server.",
+                       "readable.",
                 stage="config",
             ) from exc
         # Anything that escapes here as a bare exception, rather than a
@@ -141,8 +154,7 @@ def get_runtime() -> Runtime:
                 remedy=(
                     "This is almost always TLS or proxy configuration in the "
                     "server's environment. Check SSL_CERT_FILE, SSL_CERT_DIR and "
-                    "HTTPS_PROXY in your MCP client's env block and your shell, "
-                    "then restart the server."
+                    "HTTPS_PROXY in your MCP client's env block and your shell."
                 ),
                 stage="client",
             ) from exc
@@ -252,8 +264,8 @@ def startup_status() -> StartupStatus:
         return StartupStatus(
             mode=DeploymentMode.SANDBOX, mode_source="default", ok=False,
             stage="mode", error=str(exc),
-            remedy="Set BUILDIUM_DEPLOYMENT_MODE to one of: "
-                   + ", ".join(m.value for m in DeploymentMode),
+            remedy=_with_restart("Set BUILDIUM_DEPLOYMENT_MODE to one of: "
+                                 + ", ".join(m.value for m in DeploymentMode) + "."),
             checks={"mode": str(exc)}, base_url=None,
             spec_path=str(paths.resolve_spec_path()), operations=None,
             run_log=None, log_dir_error=None, env_files_loaded=(),
