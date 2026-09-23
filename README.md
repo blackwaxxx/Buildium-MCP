@@ -63,7 +63,7 @@ Requires Python 3.11+. Install from GitHub:
 pip install "git+https://github.com/blackwaxxx/Buildium-MCP"
 ```
 
-Append `@v0.1.1` (or any release tag) to pin a version.
+Append `@v0.1.2` (or any later release tag) to pin a version.
 
 This project is **not on PyPI yet**. Do not `pip install buildium-mcp`: until it
 is published from this repository, a package under that name is someone else's
