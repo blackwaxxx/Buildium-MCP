@@ -7,6 +7,15 @@ Two modes:
       deletes are permitted only against records this process created. An agent
       working alone cannot mutate or destroy pre-existing records.
 
+      Most of Buildium's POST endpoints have no name field at all: a charge, a
+      payment, a journal entry, a note, a check. 84 of the 119 in the spec
+      once the nested search below is taken into account.
+      There is nothing on those payloads that could carry the prefix, so the
+      guarantee above cannot be made about them. Against the sandbox that is
+      harmless and they are allowed, because the data is disposable. Against a
+      production host they are refused, since the alternative is to create a
+      live record this mode has promised to keep identifiable and cannot.
+
   open — normal operation for when a human is present. All writes are allowed,
       but deletes still require an explicit confirm flag, and everything is
       audited either way.
@@ -22,7 +31,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from .config import Config, request_permitted
+from .config import Config, is_download_request_path, request_permitted
 
 WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 DESTRUCTIVE_METHODS = frozenset({"DELETE"})
@@ -78,14 +87,81 @@ class FixtureTracker:
         return {k: sorted(v) for k, v in sorted(self.created.items())}
 
 
+# Buildium nests the people it creates: POST /v1/leases carries Tenants[] and
+# Cosigners[], each with a FirstName, and each of those becomes a real person
+# record. A top-level-only scan found no name on that payload at all and waved
+# the whole lease through, tenants included. So the search descends.
+#
+# The caps keep an enormous or maliciously deep body from turning this into an
+# unbounded traversal. Hitting one is reported, never silently treated as a
+# clean payload — see _collect_names. Depth is set with room to spare: the
+# deepest POST body in the spec that nests anything is /v1/bills/payments at 3,
+# and a legitimate payload that read as unreadable would be refused against
+# production for no reason.
+_MAX_NAME_DEPTH = 6
+_MAX_NAME_NODES = 512
+
+
+def _collect_names(payload: Any) -> tuple[list[tuple[str, str]], bool]:
+    """Every human-readable label in `payload`, as (field path, value) pairs.
+
+    Returns ``(names, truncated)``. Breadth-first, so a record's own top-level
+    label is reported before the labels of things nested inside it, and
+    NAME_FIELDS order decides within a single node. Field paths read like
+    'Tenants[0].FirstName' so a refusal can say which value to fix.
+
+    ``truncated`` is True when a cap was hit and part of the payload was never
+    examined. The caller must not read that as "no unprefixed names here": it
+    means "unknown", and the guard fails closed on it. Without that, burying a
+    name past the node cap would be a way to walk an unprefixed record straight
+    through the check.
+    """
+    found: list[tuple[str, str]] = []
+    queue: list[tuple[str, Any, int]] = [("", payload, 0)]
+    visited = 0
+    truncated = False
+
+    while queue:
+        prefix, node, depth = queue.pop(0)
+        visited += 1
+        if visited > _MAX_NAME_NODES:
+            truncated = True
+            break
+
+        if isinstance(node, dict):
+            for key in NAME_FIELDS:
+                value = node.get(key)
+                if isinstance(value, str) and value:
+                    found.append((f"{prefix}{key}", value))
+            children = [
+                (f"{prefix}{key}.", value)
+                for key, value in node.items()
+                if key not in NAME_FIELDS and isinstance(value, (dict, list))
+            ]
+        elif isinstance(node, list):
+            # prefix ends in '.', so trimming it turns 'Tenants.' into
+            # 'Tenants' before the index, giving 'Tenants[0].'.
+            stem = prefix[:-1] if prefix.endswith(".") else prefix
+            children = [
+                (f"{stem}[{index}].", value)
+                for index, value in enumerate(node)
+                if isinstance(value, (dict, list))
+            ]
+        else:
+            children = []
+
+        if children and depth >= _MAX_NAME_DEPTH:
+            truncated = True
+        else:
+            queue.extend((p, v, depth + 1) for p, v in children)
+
+    return found, truncated
+
+
 def _extract_name(payload: Any) -> str | None:
-    if not isinstance(payload, dict):
-        return None
-    for key in NAME_FIELDS:
-        value = payload.get(key)
-        if isinstance(value, str) and value:
-            return value
-    return None
+    """The single best label for `payload`, for the artifact log."""
+    names, _ = _collect_names(payload)
+    return names[0][1] if names else None
 
 
 def write_mode() -> str:
@@ -134,13 +210,48 @@ def check_write(
     prefix = tracker.config.fixture_prefix
 
     if method == "POST":
-        name = _extract_name(body)
-        if name is not None and not name.startswith(prefix):
+        # A download request is a POST that creates nothing. The read-only
+        # modes return above; this is the same carve-out for the write-enabled
+        # ones, which would otherwise refuse it below for having no name.
+        if is_download_request_path(path):
+            return
+
+        # Every label on the payload, not just the top-level one: creating a
+        # lease creates its tenants, and an unprefixed tenant is exactly the
+        # untagged record this mode exists to prevent.
+        names, truncated = _collect_names(body)
+        for field_path, name in names:
+            if not name.startswith(prefix):
+                raise GuardViolation(
+                    f"POST {path} refused in 'fixtures' mode: {field_path} is "
+                    f"{name!r}, which must start with {prefix!r} so test data "
+                    "stays identifiable and removable. Either prefix it, or "
+                    "set BUILDIUM_WRITE_MODE=open to create real records."
+                )
+
+        # Either nothing on this payload can carry the prefix, or the payload
+        # was too big to finish reading and an unprefixed name could be hiding
+        # in the part that was skipped. Both mean the same thing: this mode
+        # cannot promise the resulting record is identifiable.
+        #
+        # Whether that is acceptable depends on where the record would land,
+        # not on which mode was asked for. Pointing a production-mode server at
+        # the sandbox is still the sandbox, and the data is still disposable.
+        if (truncated or not names) and not tracker.config.is_sandbox:
+            why = (
+                "it is too large or deeply nested to check in full"
+                if truncated
+                else f"it has no name field that could carry the {prefix!r} prefix"
+            )
             raise GuardViolation(
-                f"POST {path} refused in 'fixtures' mode: the record's name "
-                f"{name!r} must start with {prefix!r} so test data stays "
-                "identifiable and removable. Either prefix the name, or set "
-                "BUILDIUM_WRITE_MODE=open to create real records."
+                f"POST {path} refused in 'fixtures' mode: {why}, so the record "
+                "it creates could not be guaranteed identifiable as test data "
+                "or findable again for cleanup. Most Buildium write endpoints "
+                "have no name field at all: charges, payments, journal entries, "
+                "checks, notes. Against the sandbox those are allowed because "
+                "the data is disposable, but this server is pointed at "
+                f"{tracker.config.host}. Set BUILDIUM_WRITE_MODE=open to create "
+                "live records deliberately, and expect to clean up by hand."
             )
         return
 
