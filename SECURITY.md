@@ -27,7 +27,10 @@ one. Expect an acknowledgement within a few days.
   and a production `BUILDIUM_BASE_URL`.
 - Credentials appearing in `run.log`, in tool output, in the startup banner, or
   in any request to a non-Buildium host.
-- A `fixtures`-mode write that modifies a record the process did not create.
+- A `fixtures`-mode update or delete of a record the process did not create.
+- A `.env` file setting anything other than a `BUILDIUM_*` variable, or being
+  read from anywhere other than the three locations listed in the README.
+- A blank or missing fixture prefix letting a `fixtures`-mode create through.
 
 ## What is not
 
@@ -41,8 +44,10 @@ one. Expect an acknowledgement within a few days.
 These are deliberate, documented, and not vulnerabilities on their own. See
 [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md) for the reasoning.
 
-- Fixture-name enforcement inspects five name-like fields; a POST body carrying
-  none of them is not prefix-checked.
+- Fixture-name enforcement inspects five name-like fields, at any depth. A
+  create is judged on its payload, not on the existing record it may attach
+  to, so a renewal of an existing lease passes if its tenant names carry the
+  prefix.
 - The "records created this session" set is in memory only and is empty after a
   restart.
 - `run.log` records request bodies, which for writes include record data.

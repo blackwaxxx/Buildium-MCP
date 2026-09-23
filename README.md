@@ -174,9 +174,14 @@ wheel and in an editable checkout. Nothing is resolved relative to a repo root.
 | Delete | requires `confirm=true` | requires `confirm=true` |
 | Audit | always | always |
 
-`fixtures` is the posture for unattended or agent-driven use: it makes damage to
-pre-existing records structurally impossible rather than merely unlikely. Switch
-to `open` for real work.
+`fixtures` is the posture for unattended or agent-driven use: an agent working
+alone cannot update or delete a record it did not create. It does not promise
+that nothing pre-existing is touched, because a create can attach to an existing
+record — a charge posted to an existing lease, or a renewal of one; see
+[KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md). Switch to `open` for real work.
+
+`BUILDIUM_FIXTURE_PREFIX` changes the prefix. A blank value means the default,
+since every name starts with an empty string.
 
 "Every name in it" means the whole payload, not just the top level. Creating a
 lease creates its tenants, so `Tenants[0].FirstName` is checked the same way the
@@ -255,11 +260,11 @@ pytest                                 # offline, no credentials
 .venv/bin/python tests/stdio_check.py               # live sandbox
 ```
 
-The unit suite (247 tests) covers spec indexing, path resolution, response
+The unit suite (340 tests) covers spec indexing, path resolution, response
 shaping, `allOf` flattening, auto-pagination, deprecation handling, error hints,
 and every guardrail branch — all four deployment modes, the download allowlist
-proved exhaustively against the spec, and the packaging and startup paths —
-with no network access. `tests/conftest.py` isolates it from any `.env` on the
+proved exhaustively against the spec, which `.env` files are read and what they
+may set, and the packaging and startup paths — with no network access. `tests/conftest.py` isolates it from any `.env` on the
 machine, so the offline suite cannot accidentally make a live call.
 
 Coverage walks, which do hit the sandbox:
@@ -295,6 +300,14 @@ co-tenants" in one call. Buildium's lease list does not reliably populate tenant
 names and its tenant endpoint has no lease filter, so without this the join costs
 one request per lease — measured at 24 calls for a single question before it
 existed, 1 after.
+
+It is built for large accounts. It reads every tenant, following pagination up
+to 100,000, and says in `complete` whether that was all of them. Given a
+`lease_id` it reads only that lease's unit, which is two requests however big
+the account is. `lease_status=Active` skips years of past tenants. Past 300
+leases it returns counts (`multi_tenant_lease_count` and friends) instead of the
+tenant-by-tenant listing, which would be too large for one tool result; filter
+by property or lease for names.
 
 Every tool carries MCP annotations (`readOnlyHint`, `destructiveHint`,
 `idempotentHint`, `openWorldHint`) so a client can tell reads from writes without
@@ -350,6 +363,12 @@ than `has_more`, caps at 1000 records, and says so explicitly if it truncated:
 {"ok": true, "count": 55, "complete": true, "pages_followed": true, "data": [...]}
 ```
 
+The cap is about the size of the answer, not the API. A lease record is about
+1.6 KB, so a thousand of them is already far more than an MCP client accepts as
+one tool result. For a larger collection, narrow the query with the tool's
+filters and `fields`, or page by hand with `limit` (up to 1000) and `offset`.
+`buildium_lease_roster` is not bound by it — see above.
+
 ### Test fixtures
 
 Buildium supports `DELETE` on only 14 of its 462 operations, so any account
@@ -359,7 +378,8 @@ count over it becomes ambiguous.
 Rather than leave that to inference, list tools and `buildium_lease_roster`
 report `fixture_count` whenever records matching the fixture prefix are
 present, along with a note saying what it means. `buildium_lease_roster` also
-precomputes `multi_tenant_leases_excluding_fixtures`. Pass
+precomputes `multi_tenant_lease_count_excluding_fixtures`, and the matching
+lease ids when the roster is small enough to list. Pass
 `exclude_fixtures=true` to filter them out.
 
 Nothing is dropped unless you ask, and `next_offset` keeps counting the rows
