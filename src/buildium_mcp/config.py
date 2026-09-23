@@ -26,12 +26,13 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import MutableMapping
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from urllib.parse import urlparse
 
-from dotenv import load_dotenv
+from dotenv import dotenv_values
 
 from . import paths
 
@@ -82,6 +83,11 @@ SANDBOX_HOSTS = frozenset({"apisandbox.buildium.com"})
 PRODUCTION_HOSTS = frozenset({"api.buildium.com"})
 
 DEFAULT_BASE_URL = "https://apisandbox.buildium.com"
+
+DEFAULT_FIXTURE_PREFIX = "ZZ-MCPTEST-"
+
+# The only variables a .env file may set. See import_env_file.
+ENV_FILE_PREFIX = "BUILDIUM_"
 
 
 # The methods a read-only mode may send. An allowlist, deliberately: the earlier
@@ -330,11 +336,41 @@ def _check_host(host: str, mode: DeploymentMode) -> None:
     )
 
 
+def import_env_file(path: Path, environ: MutableMapping[str, str]) -> None:
+    """Copy this server's own settings from one .env file into `environ`.
+
+    Only ``BUILDIUM_*`` names are taken; everything else in the file is
+    ignored. ``load_dotenv`` used to import the whole file, and httpx honours
+    HTTPS_PROXY and SSL_CERT_FILE from the environment, so a .env that set both
+    routed the credentialed client through a proxy that could read the client
+    secret. A .env is not necessarily ours to trust wholesale.
+
+    A variable already present in `environ` is never overwritten, so the real
+    process environment outranks every file, and an earlier file outranks a
+    later one.
+    """
+    for key, value in dotenv_values(path).items():
+        if key.startswith(ENV_FILE_PREFIX) and value is not None and key not in environ:
+            environ[key] = value
+
+
+def _fixture_prefix() -> str:
+    """BUILDIUM_FIXTURE_PREFIX, falling back to the default when blank.
+
+    An empty prefix is not a weaker prefix, it is no check at all: every string
+    starts with "", so fixtures mode would pass any name. Blank falls back
+    rather than failing, for the same reason as the deployment mode: an MCP
+    client that emits the variable as "" must not thereby lose the guard.
+    """
+    raw = os.getenv("BUILDIUM_FIXTURE_PREFIX", "")
+    return raw if raw.strip() else DEFAULT_FIXTURE_PREFIX
+
+
 def load_config() -> Config:
     env_files_loaded: list[str] = []
     for candidate in paths.env_file_candidates():
         if candidate.is_file():
-            load_dotenv(candidate)
+            import_env_file(candidate, os.environ)
             env_files_loaded.append(str(candidate))
 
     mode, mode_source = parse_deployment_mode(os.getenv(MODE_ENV_VAR))
@@ -373,7 +409,7 @@ def load_config() -> Config:
         spec_path=spec_path,
         run_log=run_log,
         artifact_log=artifact_log,
-        fixture_prefix=os.getenv("BUILDIUM_FIXTURE_PREFIX", "ZZ-MCPTEST-"),
+        fixture_prefix=_fixture_prefix(),
         mode=mode,
         mode_source=mode_source,
         log_dir_error=log_dir_error,

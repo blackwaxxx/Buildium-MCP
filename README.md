@@ -57,11 +57,17 @@ has access to your computer; both are standard for every local extension — see
 
 ### Any other MCP client
 
-Requires Python 3.11+.
+Requires Python 3.11+. Install from GitHub:
 
 ```bash
-pip install buildium-mcp
+pip install "git+https://github.com/blackwaxxx/Buildium-MCP"
 ```
+
+Append `@v0.1.1` (or any release tag) to pin a version.
+
+This project is **not on PyPI yet**. Do not `pip install buildium-mcp`: until it
+is published from this repository, a package under that name is someone else's
+code, and it would be handed your Buildium keys.
 
 Sandbox is a **separate Buildium account** from production — production keys do
 not authenticate against `apisandbox.buildium.com`.
@@ -85,16 +91,21 @@ with the rest of your client configuration:
 }
 ```
 
-A `.env` file works too. Four locations are searched, highest priority first,
+A `.env` file works too. Three locations are searched, highest priority first,
 and the real process environment beats all of them:
 
 1. `$BUILDIUM_ENV_FILE`
-2. the nearest `.env` at or above the working directory
-3. the root of a source checkout, if this is running from one — an MCP client
-   launches the server with a working directory of its choosing, which is often
-   not your checkout
-4. your platform config directory — `buildium_health` reports which files were
+2. the root of a source checkout, if this is running from one — found from the
+   package's own location, so it works whatever working directory the MCP
+   client picks
+3. your platform config directory — `buildium_health` reports which files were
    actually read, under `env_files_loaded`
+
+Only `BUILDIUM_*` variables are read from these files; anything else in them is
+ignored. The working directory is not searched. An MCP client starts the server
+wherever it likes, often inside a project whose `.env` has nothing to do with
+this one, and variables such as `HTTPS_PROXY` in a file like that could redirect
+the traffic that carries your API secret.
 
 ```
 BUILDIUM_CLIENT_ID=...

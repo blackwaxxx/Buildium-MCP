@@ -622,8 +622,13 @@ async def lease_roster(
     means pulling every lease one at a time. Tenant records do carry their lease
     membership, so this fetches them once and inverts the mapping locally.
 
+    Every tenant is read, following pagination, up to 1000; `complete` says
+    whether that covered them all. Narrow with property_id if it did not.
+
     lease_id:    restrict to a single lease
     property_id: restrict to leases at one property
+    limit:       page size used while fetching tenants (1-1000). It does not
+                 cap the roster.
     exclude_fixtures: drop tenants created by test tooling (names starting with
                  the fixture prefix — see buildium_health). This sandbox
                  accumulates such records permanently, because Buildium offers
@@ -631,15 +636,19 @@ async def lease_roster(
                  the response says so, so a count is never silently wrong.
     """
     rt = get_runtime()
-    query: dict[str, Any] = {"limit": limit, "offset": 0}
+    query: dict[str, Any] = {}
     if property_id is not None:
         query["propertyids"] = property_id
+    # All pages, not one: a lease's tenants can sit anywhere in the tenant
+    # list, so a single page undercounts every portfolio larger than it and
+    # answers a lease_id question with an empty roster.
     try:
-        resp = await rt.client.request("GET", "/v1/leases/tenants", query=query)
+        rows, truncated = await rt.client.get_all_pages(
+            "/v1/leases/tenants", query,
+            page_size=min(max(limit, 1), 1000), max_records=MAX_AUTO_RECORDS,
+        )
     except BuildiumError as exc:
         return _err(exc)
-
-    rows = resp.data if isinstance(resp.data, list) else []
     prefix = rt.config.fixture_prefix
     fixture_tenants = 0
     roster: dict[int, list[dict[str, Any]]] = {}
@@ -673,6 +682,8 @@ async def lease_roster(
 
     out: dict[str, Any] = {
         "ok": True,
+        "complete": not truncated,
+        "truncated_at": MAX_AUTO_RECORDS if truncated else None,
         "lease_count": len(roster),
         "tenants_seen": len(rows),
         "multi_tenant_leases": multi,
@@ -681,6 +692,12 @@ async def lease_roster(
             for k, v in sorted(roster.items())
         ],
     }
+    if truncated:
+        out["truncation_note"] = (
+            f"Stopped after {MAX_AUTO_RECORDS} tenants with more remaining, so "
+            "leases whose tenants lie past that point are missing or "
+            "undercounted. Pass property_id to narrow the query."
+        )
     if fixture_tenants:
         out["fixture_tenants"] = fixture_tenants
         out["fixtures_excluded"] = exclude_fixtures

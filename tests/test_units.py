@@ -1833,3 +1833,278 @@ async def test_file_tools_refuse_a_foreign_path_before_any_request(tmp_path, mon
         assert stub.sent == []
     finally:
         rt_mod.reset()
+
+
+# -- .env files supply only this server's settings -----------------------------
+
+# conftest replaces env_file_candidates for every test; keep the real one.
+_REAL_ENV_FILE_CANDIDATES = paths.env_file_candidates
+
+
+def test_env_file_supplies_only_buildium_settings(tmp_path):
+    """HTTPS_PROXY plus SSL_CERT_FILE in a stray .env was enough to route the
+    credentialed client through a proxy that could read the secret."""
+    env = tmp_path / ".env"
+    env.write_text(
+        "BUILDIUM_CLIENT_ID=from-file\n"
+        "HTTPS_PROXY=http://127.0.0.1:9\n"
+        "SSL_CERT_FILE=./ca.pem\n"
+        "PATH=/nowhere\n"
+    )
+    environ: dict[str, str] = {}
+    cfg.import_env_file(env, environ)
+    assert environ == {"BUILDIUM_CLIENT_ID": "from-file"}
+
+
+def test_env_file_never_overrides_what_is_already_set(tmp_path):
+    env = tmp_path / ".env"
+    env.write_text("BUILDIUM_CLIENT_ID=from-file\nBUILDIUM_CLIENT_SECRET=s\n")
+    environ = {"BUILDIUM_CLIENT_ID": "from-client"}
+    cfg.import_env_file(env, environ)
+    assert environ == {"BUILDIUM_CLIENT_ID": "from-client",
+                       "BUILDIUM_CLIENT_SECRET": "s"}
+
+
+def test_load_config_reads_credentials_from_an_env_file(tmp_path, monkeypatch):
+    env = tmp_path / ".env"
+    env.write_text("BUILDIUM_CLIENT_ID=file-id\nBUILDIUM_CLIENT_SECRET=file-secret\n"
+                   "HTTPS_PROXY=http://127.0.0.1:9\n")
+    monkeypatch.delenv("HTTPS_PROXY", raising=False)
+    # Registered with monkeypatch so the values load_config sets are undone.
+    monkeypatch.setenv("BUILDIUM_CLIENT_ID", "")
+    monkeypatch.setenv("BUILDIUM_CLIENT_SECRET", "")
+    monkeypatch.delenv("BUILDIUM_CLIENT_ID")
+    monkeypatch.delenv("BUILDIUM_CLIENT_SECRET")
+    monkeypatch.setattr(paths, "env_file_candidates", lambda: [env])
+
+    conf = cfg.load_config()
+    assert (conf.client_id, conf.client_secret) == ("file-id", "file-secret")
+    assert conf.env_files_loaded == (str(env),)
+    import os
+    assert "HTTPS_PROXY" not in os.environ
+
+
+def test_the_working_directory_env_is_not_read(tmp_path, monkeypatch):
+    """An MCP client starts the server wherever it likes; Claude Code uses the
+    open project. That project's .env is not this server's configuration."""
+    project = tmp_path / "someone-elses-project"
+    project.mkdir()
+    (project / ".env").write_text("BUILDIUM_WRITE_MODE=open\n")
+    monkeypatch.chdir(project)
+    monkeypatch.setenv("BUILDIUM_CONFIG_DIR", str(tmp_path / "config"))
+
+    candidates = _REAL_ENV_FILE_CANDIDATES()
+    assert project / ".env" not in candidates
+    assert candidates[-1] == tmp_path / "config" / ".env"
+
+
+def test_checkout_root_finds_this_checkout():
+    assert paths.checkout_root() == ROOT
+
+
+def test_checkout_root_ignores_a_project_that_merely_holds_the_install(tmp_path, monkeypatch):
+    """pip install into ~/project/.venv put a pyproject.toml and a src/ above
+    the package, and the old upward search took that for our checkout."""
+    project = tmp_path / "other-project"
+    (project / "src").mkdir(parents=True)
+    (project / "pyproject.toml").write_text("[project]\nname = 'other'\n")
+    installed = project / ".venv/lib/python3.11/site-packages/buildium_mcp/paths.py"
+    installed.parent.mkdir(parents=True)
+    installed.touch()
+    monkeypatch.setattr(paths, "__file__", str(installed))
+    assert paths.checkout_root() is None
+
+
+def test_checkout_root_recognizes_a_checkout_by_the_package_position(tmp_path, monkeypatch):
+    module = tmp_path / "checkout" / "src" / "buildium_mcp" / "paths.py"
+    module.parent.mkdir(parents=True)
+    module.touch()
+    (tmp_path / "checkout" / "pyproject.toml").write_text("[project]\n")
+    monkeypatch.setattr(paths, "__file__", str(module))
+    assert paths.checkout_root() == (tmp_path / "checkout").resolve()
+
+
+# -- a blank fixture prefix is not a prefix --------------------------------------
+
+
+@pytest.mark.parametrize("raw", ["", "   "])
+def test_a_blank_fixture_prefix_falls_back_to_the_default(monkeypatch, raw):
+    monkeypatch.setenv("BUILDIUM_CLIENT_ID", "x")
+    monkeypatch.setenv("BUILDIUM_CLIENT_SECRET", "y")
+    monkeypatch.setenv("BUILDIUM_FIXTURE_PREFIX", raw)
+    assert cfg.load_config().fixture_prefix == cfg.DEFAULT_FIXTURE_PREFIX
+
+
+def test_a_custom_fixture_prefix_is_kept(monkeypatch):
+    monkeypatch.setenv("BUILDIUM_CLIENT_ID", "x")
+    monkeypatch.setenv("BUILDIUM_CLIENT_SECRET", "y")
+    monkeypatch.setenv("BUILDIUM_FIXTURE_PREFIX", "QA-")
+    assert cfg.load_config().fixture_prefix == "QA-"
+
+
+@pytest.mark.parametrize("base_url", ["https://apisandbox.buildium.com",
+                                      "https://api.buildium.com"])
+def test_the_guard_refuses_every_create_under_a_blank_prefix(tmp_path, base_url):
+    """Every string starts with "", so a blank prefix passed a real name
+    against production in fixtures mode."""
+    import dataclasses
+
+    conf = dataclasses.replace(
+        _conf(tmp_path, cfg.DeploymentMode.PRODUCTION_WRITE, base_url=base_url),
+        fixture_prefix="",
+    )
+    with pytest.raises(GuardViolation, match="prefix is empty"):
+        check_write("POST", "/v1/rentals/owners", {"FirstName": "Real"},
+                    FixtureTracker(conf))
+
+
+# -- lease_roster reads every page ------------------------------------------------
+
+
+class _TenantTransport(httpx.AsyncBaseTransport):
+    """`total` tenants, two to a lease: tenant i is on lease 1000 + i // 2."""
+
+    def __init__(self, total: int):
+        self.tenants = [
+            {"Id": i, "FirstName": f"T{i}", "LastName": "X",
+             "Leases": [{"Id": 1000 + i // 2}]}
+            for i in range(total)
+        ]
+        self.requests: list[tuple[int, int]] = []
+
+    async def handle_async_request(self, request):
+        assert request.url.path == "/v1/leases/tenants"
+        limit = int(request.url.params.get("limit", 50))
+        offset = int(request.url.params.get("offset", 0))
+        self.requests.append((limit, offset))
+        return httpx.Response(200, json=self.tenants[offset:offset + limit])
+
+    async def aclose(self):
+        return None
+
+
+@pytest.fixture
+def roster_runtime(monkeypatch):
+    from buildium_mcp import runtime as rt_mod
+
+    monkeypatch.setenv("BUILDIUM_CLIENT_ID", "x")
+    monkeypatch.setenv("BUILDIUM_CLIENT_SECRET", "y")
+    rt_mod.reset()
+
+    def install(total):
+        transport = _TenantTransport(total)
+        rt_mod.get_runtime().client._client._transport = transport
+        return transport
+
+    yield install
+    rt_mod.reset()
+
+
+async def test_roster_follows_every_page(roster_runtime):
+    from buildium_mcp import server as server_mod
+
+    transport = roster_runtime(250)
+    result = await server_mod.lease_roster()
+    assert result["tenants_seen"] == 250
+    assert result["lease_count"] == 125
+    assert len(result["multi_tenant_leases"]) == 125
+    assert result["complete"] is True and result["truncated_at"] is None
+    assert len(transport.requests) == 3
+
+
+async def test_roster_finds_a_lease_whose_tenants_are_past_the_first_page(roster_runtime):
+    """One page of 100 tenants answered this with an empty roster."""
+    from buildium_mcp import server as server_mod
+
+    roster_runtime(250)
+    result = await server_mod.lease_roster(lease_id=1100)
+    assert result["lease_count"] == 1
+    assert [t["TenantId"] for t in result["roster"][0]["Tenants"]] == [200, 201]
+
+
+async def test_roster_says_so_when_it_stops_short(roster_runtime, monkeypatch):
+    from buildium_mcp import server as server_mod
+
+    monkeypatch.setattr(server_mod, "MAX_AUTO_RECORDS", 100)
+    roster_runtime(250)
+    result = await server_mod.lease_roster()
+    assert result["complete"] is False and result["truncated_at"] == 100
+    assert "property_id" in result["truncation_note"]
+
+
+async def test_roster_limit_is_a_page_size_clamped_to_buildiums_maximum(roster_runtime):
+    from buildium_mcp import server as server_mod
+
+    transport = roster_runtime(10)
+    await server_mod.lease_roster(limit=5000)
+    assert transport.requests[0][0] == 1000
+
+
+# -- Retry-After ---------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("header, expected", [
+    ("3", 3.0), ("0", 0.0), ("1.5", 1.5),
+    (None, 2.0), ("", 2.0), ("soon", 2.0), ("nan", 2.0), ("inf", 2.0),
+    ("-5", 0.0), ("600", 30.0),
+])
+def test_retry_after_seconds(header, expected):
+    assert client_mod._retry_after_seconds(header) == expected
+
+
+def test_retry_after_accepts_an_http_date():
+    """RFC 9110 allows a date. float() raised ValueError on one, out of the
+    tool call."""
+    from datetime import datetime, timedelta, timezone
+    from email.utils import format_datetime
+
+    soon = datetime.now(timezone.utc) + timedelta(seconds=10)
+    assert 8 <= client_mod._retry_after_seconds(format_datetime(soon, usegmt=True)) <= 10
+    assert client_mod._retry_after_seconds("Wed, 21 Oct 2015 07:28:00 GMT") == 0.0
+
+
+async def test_a_429_with_a_date_retry_after_is_retried(tmp_path, monkeypatch):
+    slept: list[float] = []
+
+    async def no_wait(seconds):
+        slept.append(seconds)
+
+    monkeypatch.setattr(client_mod, "_sleep", no_wait)
+    responses = [
+        httpx.Response(429, headers={"Retry-After": "Wed, 21 Oct 2015 07:28:00 GMT"}),
+        httpx.Response(200, json=[{"Id": 1}]),
+    ]
+    client = BuildiumClient(_conf(tmp_path, cfg.DeploymentMode.SANDBOX))
+    client._client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: responses.pop(0)),
+        base_url="https://apisandbox.buildium.com",
+    )
+    resp = await client.request("GET", "/v1/rentals")
+    assert resp.status == 200 and resp.data == [{"Id": 1}]
+    assert slept == [0.0]
+    await client.aclose()
+
+
+# -- a client that cannot be built is a startup error, not a crash -------------------
+
+
+def test_a_client_that_cannot_be_built_is_reported_not_raised(tmp_path, monkeypatch):
+    """httpx loads SSL_CERT_FILE when the client is built. A stale path made
+    every tool, buildium_health included, raise FileNotFoundError."""
+    from buildium_mcp import runtime as rt_mod
+    from buildium_mcp import server as server_mod
+
+    monkeypatch.setenv("BUILDIUM_CLIENT_ID", "x")
+    monkeypatch.setenv("BUILDIUM_CLIENT_SECRET", "y")
+    monkeypatch.setenv("SSL_CERT_FILE", str(tmp_path / "missing.pem"))
+    rt_mod.reset()
+    try:
+        health = server_mod.health()
+        assert health["ok"] is False
+        assert health["stage"] == "client"
+        assert "SSL_CERT_FILE" in health["remedy"]
+
+        result = asyncio.run(server_mod.list_rentals())
+        assert result["ok"] is False and result["type"] == "StartupError"
+    finally:
+        rt_mod.reset()

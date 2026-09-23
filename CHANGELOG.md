@@ -1,5 +1,40 @@
 # Changelog
 
+## Unreleased
+
+### Security
+- A `.env` file now supplies only `BUILDIUM_*` variables. Everything else in
+  it used to be imported too, and httpx honours `HTTPS_PROXY` and
+  `SSL_CERT_FILE`, so a `.env` setting both could route the request carrying
+  the client secret through a proxy that could read it.
+- The working directory is no longer searched for a `.env`. MCP clients start
+  the server wherever they like (Claude Code uses the open project), so that
+  search read other projects' files and ranked them above your own
+  configuration. A checkout's own `.env` is still found.
+- Installing into another project's virtualenv no longer makes that project's
+  `.env` look like this checkout's.
+- A blank `BUILDIUM_FIXTURE_PREFIX` falls back to the default. Every name
+  starts with an empty string, so a blank prefix turned the fixtures-mode name
+  check off, and the guard now refuses outright if it ever sees one.
+- `fixtures` mode checks every name in a create payload, nested ones included
+  (a lease's `Tenants[].FirstName`), and refuses creates with no name field
+  against production.
+
+### Fixed
+- `buildium_lease_roster` read one page of tenants (100) and said nothing, so
+  any larger portfolio was undercounted and a `lease_id` whose tenants sat past
+  that page returned an empty roster. It now follows every page up to 1000 and
+  reports `complete`; `limit` is the page size.
+- A `Retry-After` header in HTTP-date form raised `ValueError` out of the tool.
+- A failure while building the HTTP client (for example a stale
+  `SSL_CERT_FILE`) crashed every tool, `buildium_health` included. It is now a
+  startup error with a remedy, like a missing key.
+
+### Changed
+- The README installs from GitHub. The package is not on PyPI yet, and
+  `pip install buildium-mcp` would install whatever someone else publishes
+  under that name.
+
 ## 0.1.1 — 2026-09-18
 
 ### Changed
