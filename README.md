@@ -157,7 +157,8 @@ wheel and in an editable checkout. Nothing is resolved relative to a repo root.
 
 | | `fixtures` | `open` |
 |---|---|---|
-| Create | name must start with `ZZ-MCPTEST-` | unrestricted |
+| Create, payload has a name | every name in it must start with `ZZ-MCPTEST-` | unrestricted |
+| Create, payload has no name | sandbox host only | unrestricted |
 | Update / delete | only records created this session | unrestricted |
 | Delete | requires `confirm=true` | requires `confirm=true` |
 | Audit | always | always |
@@ -165,6 +166,22 @@ wheel and in an editable checkout. Nothing is resolved relative to a repo root.
 `fixtures` is the posture for unattended or agent-driven use: it makes damage to
 pre-existing records structurally impossible rather than merely unlikely. Switch
 to `open` for real work.
+
+"Every name in it" means the whole payload, not just the top level. Creating a
+lease creates its tenants, so `Tenants[0].FirstName` is checked the same way the
+record's own `Name` is. A refusal names the exact field.
+
+Most write endpoints have no name field anywhere: charges, payments, journal
+entries, checks, notes. 84 of the 119 `POST` operations in the spec. Nothing on
+those payloads can carry the prefix, so this mode cannot promise the record it
+creates will be identifiable, and it does not pretend otherwise. Against the
+sandbox they are allowed, because the data is disposable. Against a production
+host they are refused; use `open` to create live records deliberately.
+
+Note that this turns on the host, not on the mode: `production-write` aimed at
+the sandbox is still writing to the sandbox. The same payload is also refused
+when it is too large or too deeply nested to read in full, since "I could not
+check" must not resolve to "looked fine".
 
 Every request goes to `run.log`; every created record ID goes to
 `created-records.log`. Credentials are never written to either.

@@ -225,8 +225,11 @@ async def call_endpoint(
              larger than the page.
 
     Write guardrails apply — see buildium_health for the active mode. In the
-    default 'fixtures' mode, created records must carry the fixture prefix in
-    their name, and updates/deletes only work on records created this session.
+    default 'fixtures' mode, every name in a create payload must carry the
+    fixture prefix, nested ones included; a create whose payload has no name
+    field at all is allowed against the sandbox but refused against production,
+    since nothing on it could carry the prefix. Updates and deletes only work
+    on records created this session.
     """
     rt = get_runtime()
     resolved = rt.index.resolve_path(method, path)

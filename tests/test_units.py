@@ -27,6 +27,8 @@ from buildium_mcp.client import (  # noqa: E402
 from buildium_mcp.guards import (  # noqa: E402
     FixtureTracker,
     GuardViolation,
+    _collect_names,
+    _extract_name,
     check_write,
 )
 from buildium_mcp.shaping import list_result, project  # noqa: E402
@@ -198,6 +200,206 @@ def test_unknown_write_mode_falls_back_to_safe(tracker, monkeypatch):
     monkeypatch.setenv("BUILDIUM_WRITE_MODE", "opne")
     with pytest.raises(GuardViolation, match="must start with"):
         check_write("POST", "/v1/rentals/appliances", {"Name": "Fridge"}, tracker)
+
+
+# -- nameless payloads -------------------------------------------------------
+#
+# 84 of the 119 POST endpoints in the spec have no Name/Title/Subject/
+# CategoryName/FirstName anywhere in their request body: charges, payments,
+# journal entries, checks, deposits, notes. The prefix check cannot fire on
+# them, so what it means to be in 'fixtures' mode on those endpoints is decided
+# by where the record would land.
+
+PAYMENT = {"Amount": 1, "EntryDate": "2026-01-01", "PaymentMethod": "Check"}
+
+
+def test_nameless_create_allowed_against_the_sandbox(tracker):
+    """Sandbox data is disposable, so an untaggable create is harmless."""
+    check_write("POST", "/v1/leases/1/payments", PAYMENT, tracker)
+
+
+def test_nameless_create_refused_against_production(tmp_path):
+    """The gap this closes: fixtures mode is the default, so an operator who
+    sets production-write and leaves the write mode alone must not silently
+    create live untagged records."""
+    t = FixtureTracker(_conf(tmp_path, cfg.DeploymentMode.PRODUCTION_WRITE,
+                             base_url="https://api.buildium.com"))
+    with pytest.raises(GuardViolation, match="no name field"):
+        check_write("POST", "/v1/leases/1/payments", PAYMENT, t)
+
+
+def test_nameless_create_refusal_names_the_host(tmp_path):
+    t = FixtureTracker(_conf(tmp_path, cfg.DeploymentMode.PRODUCTION_WRITE,
+                             base_url="https://api.buildium.com"))
+    with pytest.raises(GuardViolation, match="api.buildium.com"):
+        check_write("POST", "/v1/generalledger/journalentries", {"Lines": []}, t)
+
+
+def test_production_mode_pointed_at_the_sandbox_still_allows_it(tmp_path):
+    """Mode says what is permitted; the base URL says what is targeted. A
+    production-write server aimed at the sandbox is still writing to the
+    sandbox, and the write-coverage suite depends on exactly this."""
+    t = FixtureTracker(_conf(tmp_path, cfg.DeploymentMode.PRODUCTION_WRITE))
+    check_write("POST", "/v1/leases/1/payments", PAYMENT, t)
+
+
+def test_open_mode_still_permits_nameless_production_creates(tmp_path, monkeypatch):
+    monkeypatch.setenv("BUILDIUM_WRITE_MODE", "open")
+    t = FixtureTracker(_conf(tmp_path, cfg.DeploymentMode.PRODUCTION_WRITE,
+                             base_url="https://api.buildium.com"))
+    check_write("POST", "/v1/leases/1/payments", PAYMENT, t)
+
+
+def test_download_request_survives_the_nameless_rule(tmp_path):
+    """A download request is a POST with no body that creates nothing. The
+    read-only modes carve it out already; production-write reaches the POST
+    branch, where it would otherwise be refused for having no name."""
+    t = FixtureTracker(_conf(tmp_path, cfg.DeploymentMode.PRODUCTION_WRITE,
+                             base_url="https://api.buildium.com"))
+    check_write("POST", "/v1/files/5/downloadrequest", None, t)
+    check_write("POST", "/v1/rentals/7/images/9/downloadrequests", {}, t)
+
+
+def test_a_nameless_production_create_is_still_refused_near_a_download_path(tmp_path):
+    """The carve-out is the seven templates, not anything download-shaped."""
+    t = FixtureTracker(_conf(tmp_path, cfg.DeploymentMode.PRODUCTION_WRITE,
+                             base_url="https://api.buildium.com"))
+    with pytest.raises(GuardViolation, match="no name field"):
+        check_write("POST", "/v1/files/5/downloadrequest/extra", None, t)
+
+
+# -- nested names ------------------------------------------------------------
+#
+# Creating a lease creates its tenants. A top-level-only scan saw no name on
+# that payload and let the whole thing through, live tenants included.
+
+def _lease(*first_names):
+    return {
+        "UnitId": 1,
+        "LeaseType": "AtWill",
+        "Tenants": [{"FirstName": n, "LastName": "Fixture"} for n in first_names],
+    }
+
+
+def test_nested_tenant_name_must_carry_the_prefix(tracker):
+    with pytest.raises(GuardViolation, match=r"Tenants\[0\]\.FirstName"):
+        check_write("POST", "/v1/leases", _lease("Dana"), tracker)
+
+
+def test_nested_tenant_name_with_the_prefix_is_allowed(tracker):
+    check_write("POST", "/v1/leases", _lease("ZZ-MCPTEST-Dana"), tracker)
+
+
+def test_every_nested_name_is_checked_not_only_the_first(tracker):
+    """One prefixed tenant must not license an unprefixed one beside it."""
+    with pytest.raises(GuardViolation, match=r"Tenants\[1\]\.FirstName"):
+        check_write("POST", "/v1/leases",
+                    _lease("ZZ-MCPTEST-Dana", "Rui"), tracker)
+
+
+def test_deeply_nested_name_is_found(tracker):
+    body = {"Tenants": [{"FirstName": "ZZ-MCPTEST-Dana",
+                         "EmergencyContact": {"Name": "Rui"}}]}
+    with pytest.raises(GuardViolation, match=r"EmergencyContact\.Name"):
+        check_write("POST", "/v1/leases", body, tracker)
+
+
+def test_a_nested_name_counts_as_a_name_for_the_production_rule(tmp_path):
+    """Having found a name, the nameless rule must not also fire."""
+    t = FixtureTracker(_conf(tmp_path, cfg.DeploymentMode.PRODUCTION_WRITE,
+                             base_url="https://api.buildium.com"))
+    check_write("POST", "/v1/leases", _lease("ZZ-MCPTEST-Dana"), t)
+
+
+def test_collect_names_reports_top_level_before_nested():
+    names, truncated = _collect_names({"Name": "outer", "Child": {"Name": "inner"}})
+    assert names == [("Name", "outer"), ("Child.Name", "inner")]
+    assert truncated is False
+
+
+def test_extract_name_still_prefers_the_records_own_label():
+    """The artifact log wants the record's name, not a passenger's."""
+    assert _extract_name({"Name": "outer", "Child": {"Name": "inner"}}) == "outer"
+
+
+def test_extract_name_now_finds_a_nested_label_where_there_was_none():
+    assert _extract_name(_lease("ZZ-MCPTEST-Dana")) == "ZZ-MCPTEST-Dana"
+
+
+def test_name_fields_are_ranked_within_a_node():
+    assert _extract_name({"Title": "t", "Name": "n"}) == "n"
+
+
+def test_empty_and_non_string_names_are_ignored():
+    assert _collect_names({"Name": "", "Title": 5, "Subject": None}) == ([], False)
+
+
+def _buried(depth):
+    """A name `depth` levels down, past the scan's limit when depth is large."""
+    body = node = {}
+    for _ in range(depth):
+        node["Child"] = {}
+        node = node["Child"]
+    node["Name"] = "buried"
+    return body
+
+
+def test_the_deepest_real_payload_shape_is_not_truncated():
+    """/v1/bills/payments is the deepest nesting in the spec. If a real payload
+    ever read as truncated, the fail-closed rule would refuse a valid
+    production write."""
+    body = {
+        "Lines": [{
+            "AccountingEntity": {"Id": 1, "AccountingEntityType": "Rental",
+                                 "Unit": {"Id": 2, "Href": "x"}},
+            "Amount": 1,
+        }],
+    }
+    names, truncated = _collect_names(body)
+    assert truncated is False
+    assert names == []
+
+
+def test_name_scan_is_depth_bounded():
+    names, truncated = _collect_names(_buried(12))
+    assert names == []
+    assert truncated is True
+
+
+def test_name_scan_is_breadth_bounded():
+    """A huge payload must not turn the guard into an unbounded traversal."""
+    body = {"Lines": [{"Memo": str(i)} for i in range(5000)]}
+    names, truncated = _collect_names(body)
+    assert names == []
+    assert truncated is True
+
+
+def test_a_payload_too_big_to_check_is_refused_against_production(tmp_path):
+    """Truncation means 'unknown', not 'clean'. Burying an unprefixed name
+    past the cap must not be a way through the check."""
+    t = FixtureTracker(_conf(tmp_path, cfg.DeploymentMode.PRODUCTION_WRITE,
+                             base_url="https://api.buildium.com"))
+    with pytest.raises(GuardViolation, match="too large or deeply nested"):
+        check_write("POST", "/v1/leases", _buried(12), t)
+
+
+def test_a_payload_too_big_to_check_is_still_fine_against_the_sandbox(tracker):
+    check_write("POST", "/v1/leases", _buried(12), tracker)
+
+
+def test_truncation_does_not_hide_a_name_the_scan_did_reach(tracker):
+    body = _buried(12)
+    body["Name"] = "Real"
+    with pytest.raises(GuardViolation, match="must start with"):
+        check_write("POST", "/v1/leases", body, tracker)
+
+
+def test_name_scan_tolerates_a_non_dict_body():
+    assert _collect_names(None) == ([], False)
+    assert _collect_names("a string") == ([], False)
+    assert _collect_names([{"Name": "ZZ-MCPTEST-x"}]) == (
+        [("[0].Name", "ZZ-MCPTEST-x")], False,
+    )
 
 
 # -- production hard-block ---------------------------------------------------
