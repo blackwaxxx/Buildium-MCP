@@ -23,8 +23,13 @@
 ### Fixed
 - `buildium_lease_roster` read one page of tenants (100) and said nothing, so
   any larger portfolio was undercounted and a `lease_id` whose tenants sat past
-  that page returned an empty roster. It now follows every page up to 1000 and
-  reports `complete`; `limit` is the page size.
+  that page returned an empty roster. It now follows every page, up to 100,000
+  tenants, and reports `complete`. Given a `lease_id` it reads only that
+  lease's unit (two requests). A new `lease_status` filter skips past tenants.
+  Above 300 leases it returns counts (`multi_tenant_lease_count`,
+  `multi_tenant_lease_count_excluding_fixtures`) instead of the per-lease
+  listing, which no client would accept as one result. `limit` is now the page
+  size, default 1000.
 - A `Retry-After` header in HTTP-date form raised `ValueError` out of the tool.
 - A failure while building the HTTP client (for example a stale
   `SSL_CERT_FILE`) crashed every tool, `buildium_health` included. It is now a

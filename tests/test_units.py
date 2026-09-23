@@ -1962,22 +1962,40 @@ def test_the_guard_refuses_every_create_under_a_blank_prefix(tmp_path, base_url)
 
 
 class _TenantTransport(httpx.AsyncBaseTransport):
-    """`total` tenants, two to a lease: tenant i is on lease 1000 + i // 2."""
+    """`total` tenants, two to a lease, one lease to a unit: tenant i is on
+    lease 1000 + i // 2, which is on unit 5000 + i // 2. Honours `unitids`."""
 
-    def __init__(self, total: int):
+    def __init__(self, total: int, lease_has_unit: bool = True):
         self.tenants = [
-            {"Id": i, "FirstName": f"T{i}", "LastName": "X",
-             "Leases": [{"Id": 1000 + i // 2}]}
+            {"Id": i, "FirstName": f"T{i}", "LastName": "X", "Email": f"t{i}@x",
+             "Leases": [{"Id": 1000 + i // 2, "UnitId": 5000 + i // 2}]}
             for i in range(total)
         ]
-        self.requests: list[tuple[int, int]] = []
+        self.lease_has_unit = lease_has_unit
+        self.requests: list[tuple[str, dict[str, str]]] = []
 
     async def handle_async_request(self, request):
+        params = dict(request.url.params)
+        self.requests.append((request.url.path, params))
+        if request.url.path.startswith("/v1/leases/") and request.url.path[11:].isdigit():
+            lease_id = int(request.url.path[11:])
+            if not 1000 <= lease_id < 1000 + (len(self.tenants) + 1) // 2:
+                return httpx.Response(404, json={"UserMessage": "Lease not found"})
+            lease = {"Id": lease_id}
+            if self.lease_has_unit:
+                lease["UnitId"] = 5000 + (lease_id - 1000)
+            return httpx.Response(200, json=lease)
         assert request.url.path == "/v1/leases/tenants"
-        limit = int(request.url.params.get("limit", 50))
-        offset = int(request.url.params.get("offset", 0))
-        self.requests.append((limit, offset))
-        return httpx.Response(200, json=self.tenants[offset:offset + limit])
+        rows = self.tenants
+        if "unitids" in params:
+            unit = int(params["unitids"])
+            rows = [t for t in rows if t["Leases"][0]["UnitId"] == unit]
+        limit = int(params.get("limit", 50))
+        offset = int(params.get("offset", 0))
+        return httpx.Response(200, json=rows[offset:offset + limit])
+
+    def tenant_pages(self):
+        return [p for path, p in self.requests if path == "/v1/leases/tenants"]
 
     async def aclose(self):
         return None
@@ -1991,8 +2009,8 @@ def roster_runtime(monkeypatch):
     monkeypatch.setenv("BUILDIUM_CLIENT_SECRET", "y")
     rt_mod.reset()
 
-    def install(total):
-        transport = _TenantTransport(total)
+    def install(total, **kwargs):
+        transport = _TenantTransport(total, **kwargs)
         rt_mod.get_runtime().client._client._transport = transport
         return transport
 
@@ -2004,28 +2022,98 @@ async def test_roster_follows_every_page(roster_runtime):
     from buildium_mcp import server as server_mod
 
     transport = roster_runtime(250)
-    result = await server_mod.lease_roster()
+    result = await server_mod.lease_roster(limit=100)
     assert result["tenants_seen"] == 250
     assert result["lease_count"] == 125
-    assert len(result["multi_tenant_leases"]) == 125
+    assert result["multi_tenant_lease_count"] == 125
     assert result["complete"] is True and result["truncated_at"] is None
-    assert len(transport.requests) == 3
+    assert len(transport.tenant_pages()) == 3
 
 
-async def test_roster_finds_a_lease_whose_tenants_are_past_the_first_page(roster_runtime):
-    """One page of 100 tenants answered this with an empty roster."""
+async def test_roster_reads_well_past_a_thousand_tenants(roster_runtime):
+    """The first fix reused the list tools' 1000-record ceiling, which is a
+    context limit. The roster returns a compact join, so it does not apply."""
     from buildium_mcp import server as server_mod
 
-    roster_runtime(250)
+    transport = roster_runtime(4500)
+    result = await server_mod.lease_roster()
+    assert result["complete"] is True
+    assert result["tenants_seen"] == 4500
+    assert result["lease_count"] == 2250
+    assert [p["limit"] for p in transport.tenant_pages()] == ["1000"] * 5
+
+
+async def test_roster_for_one_lease_reads_only_its_unit(roster_runtime):
+    """A lease past the first page came back empty; and scanning the whole
+    portfolio to answer for one lease cost a request per thousand tenants."""
+    from buildium_mcp import server as server_mod
+
+    transport = roster_runtime(5000)
+    result = await server_mod.lease_roster(lease_id=2100)
+    assert result["lease_count"] == 1
+    assert [t["TenantId"] for t in result["roster"][0]["Tenants"]] == [2200, 2201]
+    assert [path for path, _ in transport.requests] == [
+        "/v1/leases/2100", "/v1/leases/tenants",
+    ]
+    assert transport.tenant_pages()[0]["unitids"] == "6100"
+
+
+async def test_roster_for_one_lease_falls_back_to_a_scan_without_a_unit(roster_runtime):
+    from buildium_mcp import server as server_mod
+
+    transport = roster_runtime(250, lease_has_unit=False)
     result = await server_mod.lease_roster(lease_id=1100)
     assert result["lease_count"] == 1
-    assert [t["TenantId"] for t in result["roster"][0]["Tenants"]] == [200, 201]
+    assert "unitids" not in transport.tenant_pages()[0]
+
+
+async def test_roster_for_a_missing_lease_is_an_error(roster_runtime):
+    from buildium_mcp import server as server_mod
+
+    roster_runtime(10)
+    result = await server_mod.lease_roster(lease_id=999999)
+    assert result["ok"] is False and result["status"] == 404
+
+
+async def test_roster_passes_lease_status_through(roster_runtime):
+    from buildium_mcp import server as server_mod
+
+    transport = roster_runtime(10)
+    await server_mod.lease_roster(lease_status="Active", property_id=7)
+    page = transport.tenant_pages()[0]
+    assert page["leasetermstatuses"] == "Active" and page["propertyids"] == "7"
+
+
+async def test_roster_omits_per_lease_detail_for_a_large_portfolio(roster_runtime, monkeypatch):
+    """Hundreds of leases, tenant by tenant, is more than a client accepts as
+    one result. The counts are what a whole-portfolio question needs."""
+    from buildium_mcp import server as server_mod
+
+    monkeypatch.setattr(server_mod, "ROSTER_DETAIL_MAX_LEASES", 10)
+    roster_runtime(250)
+    result = await server_mod.lease_roster()
+    assert result["roster_omitted"] is True
+    assert "roster" not in result and "multi_tenant_leases" not in result
+    assert result["lease_count"] == 125 and result["multi_tenant_lease_count"] == 125
+    assert "property_id" in result["roster_note"]
+
+
+async def test_roster_counts_genuine_co_tenancies_even_without_detail(roster_runtime, monkeypatch):
+    from buildium_mcp import server as server_mod
+
+    monkeypatch.setattr(server_mod, "ROSTER_DETAIL_MAX_LEASES", 10)
+    transport = roster_runtime(250)
+    transport.tenants[0]["FirstName"] = "ZZ-MCPTEST-T0"   # lease 1000 is now fixture-made
+    result = await server_mod.lease_roster()
+    assert result["multi_tenant_lease_count"] == 125
+    assert result["multi_tenant_lease_count_excluding_fixtures"] == 124
+    assert "multi_tenant_leases_excluding_fixtures" not in result
 
 
 async def test_roster_says_so_when_it_stops_short(roster_runtime, monkeypatch):
     from buildium_mcp import server as server_mod
 
-    monkeypatch.setattr(server_mod, "MAX_AUTO_RECORDS", 100)
+    monkeypatch.setattr(server_mod, "ROSTER_MAX_TENANTS", 100)
     roster_runtime(250)
     result = await server_mod.lease_roster()
     assert result["complete"] is False and result["truncated_at"] == 100
@@ -2037,7 +2125,16 @@ async def test_roster_limit_is_a_page_size_clamped_to_buildiums_maximum(roster_r
 
     transport = roster_runtime(10)
     await server_mod.lease_roster(limit=5000)
-    assert transport.requests[0][0] == 1000
+    assert transport.tenant_pages()[0]["limit"] == "1000"
+
+
+async def test_get_all_pages_can_compact_records_as_they_arrive(tmp_path):
+    client, _ = _paging_client(tmp_path, 250)
+    records, truncated = await client.get_all_pages(
+        "/v1/leases", page_size=100, keep=lambda r: r["Id"]
+    )
+    assert records == list(range(250)) and truncated is False
+    await client.aclose()
 
 
 # -- Retry-After ---------------------------------------------------------------------

@@ -604,12 +604,27 @@ async def list_tenants(limit: int = 50, offset: int = 0,
                            exclude_fixtures=exclude_fixtures)
 
 
+# How far lease_roster will read. Not a context limit like MAX_AUTO_RECORDS:
+# the roster keeps three fields per tenant and returns a compact join, so
+# the only job of this ceiling is to stop a runaway loop — 100 requests at
+# Buildium's maximum page size. Real portfolios, past tenants included,
+# fit under it.
+ROSTER_MAX_TENANTS = 100_000
+
+# Above this many leases the per-lease detail is left out. At roughly 250
+# bytes a lease, a few hundred is already more than an MCP client will accept
+# as one tool result; the counts and lease ids stay, and those are what a
+# whole-portfolio question needs.
+ROSTER_DETAIL_MAX_LEASES = 300
+
+
 @mcp.tool(name="buildium_lease_roster", annotations=READ_ONLY)
 @_guarded
 async def lease_roster(
     lease_id: int | None = None,
     property_id: int | None = None,
-    limit: int = 100,
+    lease_status: str | None = None,
+    limit: int = 1000,
     exclude_fixtures: bool = False,
 ) -> dict[str, Any]:
     """Who is on which lease — the lease-to-tenant join, done in one call.
@@ -620,13 +635,19 @@ async def lease_roster(
     Buildium makes this awkward: the lease list does not reliably populate tenant
     names, and the tenant endpoint has no lease filter — so answering it directly
     means pulling every lease one at a time. Tenant records do carry their lease
-    membership, so this fetches them once and inverts the mapping locally.
+    membership, so this reads them and inverts the mapping locally.
 
-    Every tenant is read, following pagination, up to 1000; `complete` says
-    whether that covered them all. Narrow with property_id if it did not.
+    Every matching tenant is read, following pagination; `complete` says
+    whether that covered them all. With lease_id only that lease's unit is
+    read, which takes two requests however large the portfolio. Above 300
+    leases only the counts are returned (multi_tenant_lease_count and
+    friends); narrow with property_id or lease_id for lease ids and names.
 
     lease_id:    restrict to a single lease
     property_id: restrict to leases at one property
+    lease_status: Active, Past or Future — restrict to tenants with a lease
+                 term in that state. Active is usually what "who lives here"
+                 means, and skips years of past tenants.
     limit:       page size used while fetching tenants (1-1000). It does not
                  cap the roster.
     exclude_fixtures: drop tenants created by test tooling (names starting with
@@ -639,36 +660,63 @@ async def lease_roster(
     query: dict[str, Any] = {}
     if property_id is not None:
         query["propertyids"] = property_id
+    if lease_status is not None:
+        query["leasetermstatuses"] = lease_status
+
+    # A lease's tenants all belong to its unit, and the tenant endpoint can
+    # filter by unit. That turns a whole-portfolio scan into two requests.
+    if lease_id is not None:
+        try:
+            lease = await rt.client.request("GET", f"/v1/leases/{lease_id}")
+        except BuildiumError as exc:
+            return _err(exc)
+        unit_id = lease.data.get("UnitId") if isinstance(lease.data, dict) else None
+        if unit_id is not None:
+            query["unitids"] = unit_id
+
+    prefix = rt.config.fixture_prefix
+
+    def compact(tenant: Any) -> tuple[dict[str, Any], list[int]] | None:
+        """Keep what the roster needs, and drop the rest of a ~2.5 KB record
+        before the next page arrives."""
+        if not isinstance(tenant, dict):
+            return None
+        person: dict[str, Any] = {
+            "TenantId": tenant.get("Id"),
+            "Name": f"{tenant.get('FirstName', '')} {tenant.get('LastName', '')}".strip(),
+            "Email": tenant.get("Email"),
+        }
+        if _is_fixture(tenant, prefix):
+            person["IsFixture"] = True
+        lease_ids = [
+            lease["Id"] for lease in tenant.get("Leases") or []
+            if isinstance(lease, dict) and lease.get("Id") is not None
+        ]
+        return person, lease_ids
+
     # All pages, not one: a lease's tenants can sit anywhere in the tenant
     # list, so a single page undercounts every portfolio larger than it and
     # answers a lease_id question with an empty roster.
     try:
         rows, truncated = await rt.client.get_all_pages(
             "/v1/leases/tenants", query,
-            page_size=min(max(limit, 1), 1000), max_records=MAX_AUTO_RECORDS,
+            page_size=min(max(limit, 1), 1000), max_records=ROSTER_MAX_TENANTS,
+            keep=compact,
         )
     except BuildiumError as exc:
         return _err(exc)
-    prefix = rt.config.fixture_prefix
+
     fixture_tenants = 0
     roster: dict[int, list[dict[str, Any]]] = {}
-    for tenant in rows:
-        fixture = _is_fixture(tenant, prefix)
-        if fixture:
+    for row in rows:
+        if row is None:
+            continue
+        person, lease_ids = row
+        if person.get("IsFixture"):
             fixture_tenants += 1
             if exclude_fixtures:
                 continue
-        person = {
-            "TenantId": tenant.get("Id"),
-            "Name": f"{tenant.get('FirstName', '')} {tenant.get('LastName', '')}".strip(),
-            "Email": tenant.get("Email"),
-        }
-        if fixture:
-            person["IsFixture"] = True
-        for lease in tenant.get("Leases") or []:
-            lid = lease.get("Id")
-            if lid is None:
-                continue
+        for lid in lease_ids:
             roster.setdefault(lid, []).append(person)
 
     if lease_id is not None:
@@ -680,37 +728,51 @@ async def lease_roster(
         if len(v) > 1 and any(t.get("IsFixture") for t in v)
     )
 
+    genuine_multi = [k for k in multi if k not in fixture_leases]
+    detail = len(roster) <= ROSTER_DETAIL_MAX_LEASES
+
     out: dict[str, Any] = {
         "ok": True,
         "complete": not truncated,
-        "truncated_at": MAX_AUTO_RECORDS if truncated else None,
+        "truncated_at": ROSTER_MAX_TENANTS if truncated else None,
         "lease_count": len(roster),
         "tenants_seen": len(rows),
-        "multi_tenant_leases": multi,
-        "roster": [
+        "multi_tenant_lease_count": len(multi),
+    }
+    if detail:
+        out["multi_tenant_leases"] = multi
+        out["roster"] = [
             {"LeaseId": k, "TenantCount": len(v), "Tenants": v}
             for k, v in sorted(roster.items())
-        ],
-    }
+        ]
+    else:
+        # The id lists go too: 30,000 co-tenant lease ids is itself a result
+        # no client will take, and the counts answer the portfolio question.
+        out["roster_omitted"] = True
+        out["roster_note"] = (
+            f"{len(roster)} leases is too many to list in one result, so only "
+            "the counts are included. Pass property_id or lease_id for lease "
+            "ids and names."
+        )
     if truncated:
         out["truncation_note"] = (
-            f"Stopped after {MAX_AUTO_RECORDS} tenants with more remaining, so "
+            f"Stopped after {ROSTER_MAX_TENANTS} tenants with more remaining, so "
             "leases whose tenants lie past that point are missing or "
-            "undercounted. Pass property_id to narrow the query."
+            "undercounted. Pass property_id or lease_status to narrow the query."
         )
     if fixture_tenants:
         out["fixture_tenants"] = fixture_tenants
         out["fixtures_excluded"] = exclude_fixtures
         if not exclude_fixtures:
-            out["multi_tenant_leases_excluding_fixtures"] = [
-                k for k in multi if k not in fixture_leases
-            ]
+            out["multi_tenant_lease_count_excluding_fixtures"] = len(genuine_multi)
+            if detail:
+                out["multi_tenant_leases_excluding_fixtures"] = genuine_multi
             out["fixture_note"] = (
                 f"{fixture_tenants} of {len(rows)} tenants are test fixtures "
                 f"(name starts with {prefix!r}), and {len(fixture_leases)} of the "
                 f"{len(multi)} multi-tenant leases exist only because of them. "
                 "Counting genuine portfolio data means using "
-                "multi_tenant_leases_excluding_fixtures, or passing "
+                "multi_tenant_lease_count_excluding_fixtures, or passing "
                 "exclude_fixtures=true."
             )
     return out

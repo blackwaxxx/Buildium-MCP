@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import math
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -300,6 +301,7 @@ class BuildiumClient:
         *,
         page_size: int = 100,
         max_records: int = 1000,
+        keep: Callable[[Any], Any] | None = None,
     ) -> tuple[list[Any], bool]:
         """Follow offset/limit until the collection is exhausted.
 
@@ -307,6 +309,10 @@ class BuildiumClient:
         with more still available — an honest signal that the answer is
         partial, which matters more than the records themselves if a caller is
         about to count something.
+
+        `keep`, if given, maps each record as its page arrives, and only the
+        result is retained. A tenant record is about 2.5 KB; a scan that needs
+        three fields of each should not hold every full record in memory.
 
         Buildium reports no total, so the end of a collection is detected by a
         short page. A collection whose size is an exact multiple of page_size
@@ -321,7 +327,7 @@ class BuildiumClient:
                 "GET", path, query={**(query or {}), "limit": limit, "offset": offset}
             )
             page = resp.data if isinstance(resp.data, list) else []
-            records.extend(page)
+            records.extend(map(keep, page) if keep else page)
             if len(page) < limit:
                 return records, False
             offset += len(page)
