@@ -20,15 +20,43 @@ iterates every POST in the spec and asserts precisely those seven are reachable.
 
 ## Fixture-mode name checking is a heuristic
 
-In `fixtures` mode a created record's name must start with the fixture prefix.
-The name is read from the first non-empty of `Name`, `Title`, `Subject`,
-`CategoryName`, `FirstName`.
+In `fixtures` mode every name in a create payload must start with the fixture
+prefix, at any depth: a lease's `Tenants[0].FirstName` is checked the same way
+as its own `Name`. A "name" is one of five fields — `Name`, `Title`, `Subject`,
+`CategoryName`, `FirstName` — so a value in any other field (`LastName`,
+`CompanyName`, a memo) is neither checked nor enough to make a record
+identifiable.
 
-**A POST body carrying none of those fields is not prefix-checked.** That covers
-most financial posts — journal entries, bill payments, deposits — which have no
-natural name field. Fixtures mode is a guard against *accidental* damage, not an
-authorization system. For real work in production use `production-write` with
-`BUILDIUM_WRITE_MODE=open` and mean it.
+A create with none of those fields anywhere covers most financial posts:
+charges, payments, journal entries, checks. It is allowed against the sandbox
+and refused against production, because nothing on it could carry the prefix.
+The same goes for a payload too large or too deeply nested to scan in full. A
+blank `BUILDIUM_FIXTURE_PREFIX` falls back to the default rather than matching
+every name.
+
+**What the mode does not check is where a create lands.** A `POST` to a
+sub-resource of an existing record is judged on its payload alone. In the
+sandbox that lets a nameless charge be posted to an existing lease. In
+production it lets `POST /v1/leases/{leaseId}/renewals` renew a real lease, as
+long as any tenant names in the renewal carry the prefix. Fixtures mode is a
+guard against *accidental* damage, not an authorization system. For real work in
+production use `production-write` with `BUILDIUM_WRITE_MODE=open` and mean it.
+
+## `all_pages` returns at most 1000 records
+
+The list tools and `buildium_call_endpoint` stop following pages at 1000
+records, and report `complete: false` when more remained. The limit is about the
+size of the answer, not the API: a lease record is about 1.6 KB and a tenant
+about 2.5 KB, so a thousand full records is already far more than an MCP client
+accepts as one tool result. An account larger than that needs a narrower query —
+the tools' filters, and `fields` to trim each record — or manual paging with
+`limit` (up to 1000) and `offset`. There is no server-side count yet, so counting
+past 1000 records takes several calls.
+
+`buildium_lease_roster` is the exception, because it returns a compact join
+rather than the records. It reads up to 100,000 tenants, reads only one unit
+when given a lease, and above 300 leases returns counts instead of the
+tenant-by-tenant listing.
 
 ## "Created this session" is in memory only
 
