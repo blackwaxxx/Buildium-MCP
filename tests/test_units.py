@@ -2644,3 +2644,90 @@ async def test_buildium_get_rejects_a_path_outside_the_spec(counting_runtime):
     result = await server_mod.get_endpoint("/v1/not-a-thing")
     assert result["ok"] is False and "not in the Buildium spec" in result["error"]
     assert transport.requests == []
+
+
+# -- every parameter is described in the schema -------------------------------------
+
+
+def test_every_tool_parameter_has_a_schema_description():
+    """Docstring prose never reached the JSON schema, so clients showed bare
+    parameter names and the model had to dig the meaning out of a paragraph."""
+    from buildium_mcp import server as server_mod
+
+    tools = asyncio.run(server_mod.mcp.list_tools())
+    missing = [
+        f"{tool.name}.{name}"
+        for tool in tools
+        for name, schema in tool.parameters.get("properties", {}).items()
+        if not schema.get("description")
+    ]
+    assert not missing, f"parameters without a description: {missing}"
+
+
+def test_no_implementation_notes_leak_into_tool_descriptions():
+    from buildium_mcp import server as server_mod
+
+    for tool in asyncio.run(server_mod.mcp.list_tools()):
+        for word in ("_guarded", "Deliberately not wrapped"):
+            assert word not in (tool.description or ""), tool.name
+
+
+# -- a list body reaches the endpoints that take one ---------------------------------
+
+
+async def test_call_endpoint_accepts_a_list_body(monkeypatch):
+    """POST /v1/customfields/.../values takes an array. A dict-only body
+    made it impossible to call at all."""
+    import json as _json
+
+    from buildium_mcp import runtime as rt_mod
+    from buildium_mcp import server as server_mod
+
+    monkeypatch.setenv("BUILDIUM_CLIENT_ID", "x")
+    monkeypatch.setenv("BUILDIUM_CLIENT_SECRET", "y")
+    rt_mod.reset()
+    sent = []
+
+    def handler(request):
+        sent.append((request.method, request.url.path, _json.loads(request.content)))
+        return httpx.Response(200, json=[])
+
+    try:
+        rt_mod.get_runtime().client._client._transport = httpx.MockTransport(handler)
+        values = [{"CustomFieldDefinitionId": 3, "Value": "blue"}]
+        result = await server_mod.call_endpoint(
+            "POST", "/v1/customfields/entityType/Rental/entityId/5/values", body=values
+        )
+        assert result["ok"] is True
+        assert sent == [("POST", "/v1/customfields/entityType/Rental/entityId/5/values", values)]
+    finally:
+        rt_mod.reset()
+
+
+# -- every startup remedy says a restart is needed ------------------------------------
+
+
+@pytest.mark.parametrize("setup, stage", [
+    ({}, "credentials"),
+    ({cfg.MODE_ENV_VAR: "not-a-mode"}, "mode"),
+    ({"BUILDIUM_CLIENT_ID": "x", "BUILDIUM_CLIENT_SECRET": "y",
+      "BUILDIUM_BASE_URL": "https://api.buildium.com"}, "base_url"),
+    ({"BUILDIUM_CLIENT_ID": "x", "BUILDIUM_CLIENT_SECRET": "y",
+      "SSL_CERT_FILE": "/nonexistent/ca.pem"}, "client"),
+])
+def test_every_startup_remedy_says_to_restart(monkeypatch, setup, stage):
+    """Startup is memoized, failure included. A user who fixes the problem and
+    sees the same error has no way to know the fix is waiting on a restart."""
+    from buildium_mcp import runtime as rt_mod
+    from buildium_mcp import server as server_mod
+
+    for name, value in setup.items():
+        monkeypatch.setenv(name, value)
+    rt_mod.reset()
+    try:
+        health = server_mod.health()
+        assert health["ok"] is False and health["stage"] == stage
+        assert "restart the server" in health["remedy"], health["remedy"]
+        assert health["remedy"].lower().count("restart") == 1, "said twice"
+    finally:
+        rt_mod.reset()

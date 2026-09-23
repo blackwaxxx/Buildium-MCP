@@ -42,6 +42,12 @@ in a checkout and wrong in a wheel. Use `buildium_mcp.paths`.
 **A new deployment mode without updating the enum-iteration tests.** They assert
 exact sets precisely so that a new member cannot inherit permissions silently.
 
+**A GitHub Action referenced by tag.** Every `uses:` names a full commit SHA with
+its version in a comment, and `tests/test_mcpb.py` enforces it. A tag can be
+moved by the action's owner; CI builds the released bundle and `release.yml`
+can publish to PyPI. To update one, resolve the new tag to its commit and change
+the SHA and the comment together.
+
 ## Releasing
 
 1. Bump `version` in `pyproject.toml` and `__version__` in

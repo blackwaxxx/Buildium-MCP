@@ -270,7 +270,7 @@ pytest                                 # offline, no credentials
 .venv/bin/python tests/stdio_check.py               # live sandbox
 ```
 
-The unit suite (379 tests) covers spec indexing, path resolution, response
+The unit suite (388 tests) covers spec indexing, path resolution, response
 shaping, `allOf` flattening, auto-pagination, deprecation handling, error hints,
 and every guardrail branch — all four deployment modes, the download allowlist
 proved exhaustively against the spec, which `.env` files are read and what they

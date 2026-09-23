@@ -80,9 +80,12 @@ USER_CONFIG: dict[str, dict[str, Any]] = {
         "title": "Allow changes in production",
         "description": (
             "Off: in production, every request that could change a record is "
-            "refused before it leaves your computer. On: Claude can create and "
-            "edit live records. Leave off until you have used read-only for a "
-            "while. Has no effect in the sandbox."
+            "refused before it leaves your computer. On: Claude may send changes "
+            "to your live account, but with the next toggle off it can only "
+            "create new records named with the ZZ-MCPTEST- prefix and work on "
+            "those. To let it edit or add to your existing records, turn on "
+            "both. Leave off until you have used read-only for a while. Has no "
+            "effect in the sandbox."
         ),
         "default": False,
         "required": False,
@@ -105,8 +108,9 @@ USER_CONFIG: dict[str, dict[str, Any]] = {
         "description": (
             "Off (recommended for unattended use): new records must be named "
             "with the ZZ-MCPTEST- prefix, and only records created in this "
-            "session can be edited or deleted. On: any record; deletes still "
-            "need explicit confirmation."
+            "session can be edited, deleted or added to. On: any record, which "
+            "is what real work in production needs; deletes still need "
+            "explicit confirmation."
         ),
         "default": False,
         "required": False,

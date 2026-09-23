@@ -191,3 +191,28 @@ def test_ci_workflows_default_to_a_read_only_token():
     for name in ("ci.yml", "release.yml"):
         text = (ROOT / ".github" / "workflows" / name).read_text()
         assert "\npermissions:\n  contents: read\n" in text, name
+
+
+def test_allow_writes_does_not_promise_edits_it_cannot_make(manifest):
+    """With the write-mode toggle off, fixtures mode refuses edits to existing
+    records. The old text said "Claude can create and edit live records"."""
+    form = manifest["user_config"]
+    allow = form["allow_writes"]["description"]
+    assert "edit live records" not in allow
+    assert "ZZ-MCPTEST-" in allow and "both" in allow
+
+
+def test_every_workflow_action_is_pinned_to_a_commit():
+    """A tag like @v4 can be moved by the action's owner. CI builds the
+    released .mcpb and release.yml publishes to PyPI, so neither may run
+    whatever a tag points at today."""
+    import re
+
+    for path in sorted((ROOT / ".github" / "workflows").glob("*.yml")):
+        for line in path.read_text().splitlines():
+            if "uses:" not in line:
+                continue
+            assert re.search(r"uses: [\w.-]+/[\w./-]+@[0-9a-f]{40} # v\d+\.\d+\.\d+$", line), (
+                f"{path.name}: {line.strip()} is not pinned to a full commit SHA "
+                "with its version in a comment"
+            )

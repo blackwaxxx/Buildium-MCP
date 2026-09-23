@@ -17,9 +17,10 @@ import logging
 import mimetypes
 import os
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 from fastmcp import FastMCP
+from pydantic import Field
 
 from . import paths
 from .banner import configure_logging, emit_banner
@@ -92,6 +93,35 @@ WRITE_CAPABLE = {"readOnlyHint": False, "destructiveHint": True, "idempotentHint
                  "openWorldHint": True}
 
 
+# Parameter descriptions. They land in each tool's JSON schema, which is where
+# an MCP client shows them and where the model looks when filling a call; a
+# docstring reaches the model only as one long block of prose. The shared ones
+# are aliases so that the eight tools that page cannot drift apart.
+ApiPath = Annotated[str, Field(
+    description='Buildium API path, e.g. "/v1/vendors" or "/v1/leases/12345".')]
+Query = Annotated[dict[str, Any] | None, Field(
+    description='Query-string parameters, e.g. {"statuses": "Active"}.')]
+Fields = Annotated[list[str] | None, Field(
+    description='Keep only these top-level fields in each record, e.g. ["Id", "Name"]. '
+                "Buildium records are large and carry tax IDs and addresses you may "
+                "not need.")]
+AllPages = Annotated[bool, Field(
+    description="Follow pagination and return the records, up to 1000. Use it for "
+                "totals and other aggregates; a figure from one page is wrong "
+                "whenever there is more than one page.")]
+CountOnly = Annotated[bool, Field(
+    description="Follow every page, up to 100,000 records, and return only how many "
+                'there are. Use it for "how many" questions.')]
+ExcludeFixtures = Annotated[bool, Field(
+    description="Leave out test records, whose names start with the fixture prefix "
+                "(see buildium_health). When any are present the response says so "
+                "either way.")]
+Limit = Annotated[int, Field(description="Records per page, 1-1000.")]
+Offset = Annotated[int, Field(
+    description="How many records to skip. Use next_offset from the previous page.")]
+PropertyId = Annotated[int | None, Field(description="Only this rental property.")]
+
+
 def _err(exc: Exception) -> dict[str, Any]:
     """Return errors as data. Raising gives the model a stack trace; this gives
     it something it can act on."""
@@ -112,19 +142,19 @@ def _err(exc: Exception) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+# Deliberately not wrapped by _guarded: this is the one tool that must answer
+# when everything else cannot, so it reports status rather than raising.
 @mcp.tool(name="buildium_health", annotations=LOCAL_ONLY)
 def health() -> dict[str, Any]:
     """Report which Buildium environment this server is bound to (sandbox,
     production read-only, production read-only with file downloads, or
     production with writes), the active write mode, how many operations are
-    indexed, and — if the server is not configured — exactly what to set.
+    indexed, where downloads go, and — if the server is not configured —
+    exactly what to set.
 
     Only needed before a WRITE, when the environment is genuinely in doubt, or
     when another tool reports a startup problem. Read-only questions do not
-    require it.
-
-    Deliberately not wrapped by _guarded: this is the one tool that must answer
-    when everything else cannot, so it reports status rather than raising."""
+    require it."""
     status = startup_status()
     payload: dict[str, Any] = {"ok": status.ok}
     payload.update(status.as_dict())
@@ -153,14 +183,15 @@ def list_tags() -> dict[str, Any]:
 
 @mcp.tool(name="buildium_search_endpoints", annotations=LOCAL_ONLY)
 @_guarded
-def search_endpoints(query: str, method: str | None = None, limit: int = 25) -> dict[str, Any]:
+def search_endpoints(
+    query: Annotated[str, Field(description='Natural keywords, e.g. "work orders", "lease transactions", "gl accounts".')],
+    method: Annotated[str | None, Field(description="Only endpoints with this HTTP method: get, post, put, patch or delete.")] = None,
+    limit: Annotated[int, Field(description="Most results to return.")] = 25,
+) -> dict[str, Any]:
     """Find Buildium API endpoints by keyword.
 
     Searches paths, summaries, tags, and operation IDs across all 462
     operations. Start here when you don't already know the exact path.
-
-    query:  natural keywords, e.g. "work orders", "lease transactions", "gl accounts"
-    method: optionally restrict to get/post/put/patch/delete
     """
     index = get_index()
     results = index.search(query, limit=limit, method=method)
@@ -169,7 +200,10 @@ def search_endpoints(query: str, method: str | None = None, limit: int = 25) -> 
 
 @mcp.tool(name="buildium_describe_endpoint", annotations=LOCAL_ONLY)
 @_guarded
-def describe_endpoint(method: str, path: str) -> dict[str, Any]:
+def describe_endpoint(
+    method: Annotated[str, Field(description="HTTP method: GET, POST, PUT, PATCH or DELETE.")],
+    path: ApiPath,
+) -> dict[str, Any]:
     """Show the full contract for one endpoint: parameters, request body schema,
     and success response schema, with $refs resolved.
 
@@ -189,8 +223,10 @@ def describe_endpoint(method: str, path: str) -> dict[str, Any]:
 
 @mcp.tool(name="buildium_describe_schema", annotations=LOCAL_ONLY)
 @_guarded
-def describe_schema(name: str) -> dict[str, Any]:
-    """Expand a named schema from the spec (e.g. "LeasePostMessage"). Useful when
+def describe_schema(
+    name: Annotated[str, Field(description='Schema name from the spec, e.g. "LeasePostMessage".')],
+) -> dict[str, Any]:
+    """Expand a named schema from the spec. Useful when
     buildium_describe_endpoint hit its depth limit and emitted a bare $ref."""
     index = get_index()
     schema = index.schema(name)
@@ -206,29 +242,17 @@ def describe_schema(name: str) -> dict[str, Any]:
 @mcp.tool(name="buildium_get", annotations=READ_ONLY)
 @_guarded
 async def get_endpoint(
-    path: str,
-    query: dict[str, Any] | None = None,
-    fields: list[str] | None = None,
-    all_pages: bool = False,
-    count_only: bool = False,
+    path: ApiPath,
+    query: Query = None,
+    fields: Fields = None,
+    all_pages: AllPages = False,
+    count_only: CountOnly = False,
 ) -> dict[str, Any]:
     """Read any Buildium endpoint (GET). Cannot change anything.
 
     Use this for every read that has no curated shortcut. It is a separate
     tool from buildium_call_endpoint so that a client can approve reads once
     and still ask about each write.
-
-    path:    e.g. "/v1/vendors" or "/v1/leases/12345"
-    query:   query-string parameters
-    fields:  keep only these top-level fields in the response. Buildium records
-             are large — passing e.g. ["Id","Name","PropertyIds"] avoids pulling
-             tax IDs and full addresses you did not ask for.
-    all_pages: follow pagination instead of returning the first page, and
-             return the records, up to 1000. Use it for totals and other
-             aggregates; a figure taken from one page is wrong whenever the
-             collection is larger than the page.
-    count_only: follow every page, up to 100,000 records, and return only how
-             many there are. Use it for "how many" questions.
     """
     return await _call(get_runtime(), "GET", path, query, None, fields,
                        confirm=False, all_pages=all_pages, count_only=count_only)
@@ -237,27 +261,19 @@ async def get_endpoint(
 @mcp.tool(name="buildium_call_endpoint", annotations=WRITE_CAPABLE)
 @_guarded
 async def call_endpoint(
-    method: str,
-    path: str,
-    query: dict[str, Any] | None = None,
-    body: dict[str, Any] | None = None,
-    fields: list[str] | None = None,
-    confirm: bool = False,
-    all_pages: bool = False,
-    count_only: bool = False,
+    method: Annotated[str, Field(description="POST, PUT, PATCH or DELETE. GET also works, but buildium_get is the tool for reads.")],
+    path: ApiPath,
+    query: Query = None,
+    body: Annotated[dict[str, Any] | list[Any] | None, Field(description="JSON request body. Usually an object; a few endpoints, such as custom field values, take a list. buildium_describe_endpoint shows which.")] = None,
+    fields: Fields = None,
+    confirm: Annotated[bool, Field(description="Must be true for DELETE.")] = False,
+    all_pages: Annotated[bool, Field(description="GET only; see buildium_get.")] = False,
+    count_only: Annotated[bool, Field(description="GET only; see buildium_get.")] = False,
 ) -> dict[str, Any]:
     """Call any Buildium endpoint: the tool for writes.
 
     For reads use buildium_get, which is read-only and so can be approved
-    once. GET is still accepted here.
-
-    method:  POST, PUT, PATCH, DELETE (or GET)
-    path:    e.g. "/v1/leases" or "/v1/leases/12345"
-    query:   query-string parameters
-    body:    JSON request body for writes
-    fields:  keep only these top-level fields in the response
-    confirm: required (true) for DELETE
-    all_pages, count_only: GET only; see buildium_get.
+    once.
 
     Write guardrails apply — see buildium_health for the active mode. In the
     default 'fixtures' mode, every name in a create payload must carry the
@@ -273,7 +289,7 @@ async def call_endpoint(
 
 async def _call(
     rt: Runtime, method: str, path: str, query: dict[str, Any] | None,
-    body: dict[str, Any] | None, fields: list[str] | None, *,
+    body: dict[str, Any] | list[Any] | None, fields: list[str] | None, *,
     confirm: bool, all_pages: bool, count_only: bool,
 ) -> dict[str, Any]:
     """What buildium_get and buildium_call_endpoint share: spec lookup, the
@@ -372,13 +388,13 @@ def _upload_refusal(source: Path) -> str | None:
 @mcp.tool(name="buildium_upload_file", annotations=WRITE_CAPABLE)
 @_guarded
 async def upload_file(
-    file_path: str,
-    title: str,
-    category_id: int,
-    entity_type: str = "Rental",
-    entity_id: int | None = None,
-    description: str | None = None,
-    upload_path: str = "/v1/files/uploads",
+    file_path: Annotated[str, Field(description="Path to the file on this machine. Hidden files, *.env files and this server's own configuration are refused.")],
+    title: Annotated[str, Field(description="The file's title in Buildium. In 'fixtures' write mode it must start with the fixture prefix (see buildium_health).")],
+    category_id: Annotated[int, Field(description="File category, from GET /v1/files/categories. Buildium rejects the upload without a real one.")],
+    entity_type: Annotated[str, Field(description="What the file is attached to: Rental, Lease, Tenant, Vendor, Association, RentalOwner, RentalUnit, and so on.")] = "Rental",
+    entity_id: Annotated[int | None, Field(description="The ID of that record.")] = None,
+    description: Annotated[str | None, Field(description="Optional description stored with the file.")] = None,
+    upload_path: Annotated[str, Field(description='For a file belonging to a bill, check or task history, that resource\'s own uploads path, e.g. "/v1/bills/123/files/uploads". Only Buildium\'s seven upload endpoints are accepted.')] = "/v1/files/uploads",
 ) -> dict[str, Any]:
     """Upload a local file to Buildium, handling both steps of its upload flow.
 
@@ -386,19 +402,6 @@ async def upload_file(
     AWS presigned PUT URL, and the file is sent there directly. Doing that by
     hand with buildium_call_endpoint does not work — it would post the
     metadata and hand you a URL it cannot then PUT to. Use this instead.
-
-    file_path:   path to the file on this machine
-    title:       the file's title in Buildium. In 'fixtures' write mode this
-                 must start with the fixture prefix (see buildium_health).
-    category_id: from GET /v1/files/categories — required, and Buildium
-                 rejects the upload without a real one.
-    entity_type: what the file is attached to — Rental, Lease, Tenant, Vendor,
-                 Association, RentalOwner, RentalUnit, and so on.
-    entity_id:   the ID of that record.
-    upload_path: for files belonging to a bill, check, or task history, pass
-                 that resource's own uploads path, e.g.
-                 "/v1/bills/123/files/uploads". Only Buildium's seven
-                 upload-request endpoints are accepted here, in every mode.
     """
     rt = get_runtime()
     if not is_upload_request_path(upload_path if upload_path.startswith("/")
@@ -501,10 +504,10 @@ def _default_download_name(file_id: int, content_type: str) -> str:
 @mcp.tool(name="buildium_download_file", annotations=WRITE_CAPABLE)
 @_guarded
 async def download_file(
-    file_id: int,
-    save_to: str | None = None,
-    download_path: str | None = None,
-    overwrite: bool = False,
+    file_id: Annotated[int, Field(description="The file's ID, from GET /v1/files.")],
+    save_to: Annotated[str | None, Field(description="A file name, or a path inside the download folder; relative paths are taken relative to it. Omit to save as buildium-file-<id> with an extension from the content type.")] = None,
+    download_path: Annotated[str | None, Field(description='For a file belonging to a bill, check or task history, that resource\'s own download path, e.g. "/v1/bills/123/files/456/downloadrequest". Only Buildium\'s seven download endpoints are accepted.')] = None,
+    overwrite: Annotated[bool, Field(description="Replace a file that already exists at that name.")] = False,
 ) -> dict[str, Any]:
     """Download a Buildium file to this machine, handling both steps.
 
@@ -520,17 +523,6 @@ async def download_file(
     Buildium models a download request as a POST, and that mode blocks every
     POST at the transport layer without exception. Reading file *metadata* via
     GET /v1/files/{id} still works.
-
-    file_id:       from GET /v1/files
-    save_to:       a file name, or a path inside the download folder. Relative
-                   paths are taken relative to that folder. Omit it to save as
-                   buildium-file-<id> with an extension from the content type.
-    download_path: for a file belonging to a bill, check, or task history, that
-                   resource's own download path, e.g.
-                   "/v1/bills/123/files/456/downloadrequest". Only Buildium's
-                   seven download-request endpoints are accepted here, in
-                   every mode.
-    overwrite:     replace a file that already exists at that name.
     """
     rt = get_runtime()
     path = download_path or f"/v1/files/{file_id}/downloadrequest"
@@ -689,18 +681,14 @@ async def _get_list(
 
 @mcp.tool(name="buildium_list_rentals", annotations=READ_ONLY)
 @_guarded
-async def list_rentals(limit: int = 50, offset: int = 0,
-                       fields: list[str] | None = None,
-                       all_pages: bool = False,
-                       exclude_fixtures: bool = False,
-                       count_only: bool = False) -> dict[str, Any]:
+async def list_rentals(limit: Limit = 50, offset: Offset = 0,
+                       fields: Fields = None,
+                       all_pages: AllPages = False,
+                       exclude_fixtures: ExcludeFixtures = False,
+                       count_only: CountOnly = False) -> dict[str, Any]:
     """List rental properties. Pass `fields` to narrow large records.
 
-    A single page is only the first 50 records, so a count or total taken from
-    it will be wrong.
-    To count, pass count_only=true: it reads every page, up to 100,000
-    records, and returns only the number. all_pages=true returns the records
-    themselves, up to 1000, for totals and other aggregates."""
+    To count, use count_only; for totals, all_pages."""
     rt = get_runtime()
     return await _get_list(rt, "/v1/rentals", limit, offset, fields=fields,
                            all_pages=all_pages,
@@ -710,7 +698,10 @@ async def list_rentals(limit: int = 50, offset: int = 0,
 
 @mcp.tool(name="buildium_get_rental", annotations=READ_ONLY)
 @_guarded
-async def get_rental(rental_id: int, fields: list[str] | None = None) -> dict[str, Any]:
+async def get_rental(
+    rental_id: Annotated[int, Field(description="The rental property's ID.")],
+    fields: Fields = None,
+) -> dict[str, Any]:
     """Get one rental property by ID."""
     rt = get_runtime()
     try:
@@ -722,16 +713,15 @@ async def get_rental(rental_id: int, fields: list[str] | None = None) -> dict[st
 
 @mcp.tool(name="buildium_list_units", annotations=READ_ONLY)
 @_guarded
-async def list_units(property_id: int | None = None, limit: int = 50, offset: int = 0,
-                     fields: list[str] | None = None,
-                     all_pages: bool = False,
-                     exclude_fixtures: bool = False,
-                     count_only: bool = False) -> dict[str, Any]:
+async def list_units(property_id: PropertyId = None,
+                     limit: Limit = 50, offset: Offset = 0,
+                     fields: Fields = None,
+                     all_pages: AllPages = False,
+                     exclude_fixtures: ExcludeFixtures = False,
+                     count_only: CountOnly = False) -> dict[str, Any]:
     """List rental units, optionally filtered to one property.
 
-    To count, pass count_only=true: it reads every page, up to 100,000
-    records, and returns only the number. all_pages=true returns the records
-    themselves, up to 1000, for totals and other aggregates."""
+    To count, use count_only; for totals, all_pages."""
     rt = get_runtime()
     return await _get_list(rt, "/v1/rentals/units", limit, offset,
                            {"propertyids": property_id}, fields, all_pages,
@@ -741,13 +731,14 @@ async def list_units(property_id: int | None = None, limit: int = 50, offset: in
 
 @mcp.tool(name="buildium_list_leases", annotations=READ_ONLY)
 @_guarded
-async def list_leases(property_id: int | None = None, lease_status: str | None = None,
-                      limit: int = 50, offset: int = 0,
-                      fields: list[str] | None = None,
-                      all_pages: bool = False,
-                      exclude_fixtures: bool = False,
-                      count_only: bool = False) -> dict[str, Any]:
-    """List leases. lease_status is one of Active, Future, Past, Expired.
+async def list_leases(property_id: PropertyId = None,
+                      lease_status: Annotated[str | None, Field(description="Active, Future, Past or Expired.")] = None,
+                      limit: Limit = 50, offset: Offset = 0,
+                      fields: Fields = None,
+                      all_pages: AllPages = False,
+                      exclude_fixtures: ExcludeFixtures = False,
+                      count_only: CountOnly = False) -> dict[str, Any]:
+    """List leases.
 
     Each row already carries the rent terms under `AccountDetails` (including
     `AccountDetails.Rent`, the recurring monthly amount) and the lease dates.
@@ -757,9 +748,7 @@ async def list_leases(property_id: int | None = None, lease_status: str | None =
 
     For who is on each lease, use buildium_lease_roster.
 
-    To count, pass count_only=true: it reads every page, up to 100,000
-    records, and returns only the number. all_pages=true returns the records
-    themselves, up to 1000, for totals and other aggregates."""
+    To count, use count_only; for totals, all_pages."""
     rt = get_runtime()
     return await _get_list(rt, "/v1/leases", limit, offset,
                            {"propertyids": property_id, "leasestatuses": lease_status},
@@ -768,7 +757,10 @@ async def list_leases(property_id: int | None = None, lease_status: str | None =
 
 @mcp.tool(name="buildium_get_lease", annotations=READ_ONLY)
 @_guarded
-async def get_lease(lease_id: int, fields: list[str] | None = None) -> dict[str, Any]:
+async def get_lease(
+    lease_id: Annotated[int, Field(description="The lease's ID.")],
+    fields: Fields = None,
+) -> dict[str, Any]:
     """Get one lease by ID, including tenants and rent terms."""
     rt = get_runtime()
     try:
@@ -780,18 +772,19 @@ async def get_lease(lease_id: int, fields: list[str] | None = None) -> dict[str,
 
 @mcp.tool(name="buildium_list_lease_transactions", annotations=READ_ONLY)
 @_guarded
-async def list_lease_transactions(lease_id: int, limit: int = 50, offset: int = 0,
-                                  fields: list[str] | None = None,
-                                  all_pages: bool = False,
-                                  exclude_fixtures: bool = False,
-                                  count_only: bool = False) -> dict[str, Any]:
+async def list_lease_transactions(lease_id: Annotated[int, Field(description="The lease's ID.")],
+                                  limit: Limit = 50, offset: Offset = 0,
+                                  fields: Fields = None,
+                                  all_pages: AllPages = False,
+                                  exclude_fixtures: ExcludeFixtures = False,
+                                  count_only: CountOnly = False) -> dict[str, Any]:
     """List financial transactions (posted charges and payments) for a lease.
 
     For the lease's recurring rent amount use buildium_list_leases instead —
     it is already on every row under AccountDetails.Rent.
 
     Set all_pages=true when totalling a ledger, and count_only=true to learn
-    only how many transactions there are (every page, up to 100,000)."""
+    only how many transactions there are."""
     rt = get_runtime()
     return await _get_list(rt, f"/v1/leases/{lease_id}/transactions", limit, offset,
                            fields=fields, all_pages=all_pages,
@@ -801,16 +794,14 @@ async def list_lease_transactions(lease_id: int, limit: int = 50, offset: int = 
 
 @mcp.tool(name="buildium_list_work_orders", annotations=READ_ONLY)
 @_guarded
-async def list_work_orders(limit: int = 50, offset: int = 0,
-                           fields: list[str] | None = None,
-                           all_pages: bool = False,
-                           exclude_fixtures: bool = False,
-                           count_only: bool = False) -> dict[str, Any]:
+async def list_work_orders(limit: Limit = 50, offset: Offset = 0,
+                           fields: Fields = None,
+                           all_pages: AllPages = False,
+                           exclude_fixtures: ExcludeFixtures = False,
+                           count_only: CountOnly = False) -> dict[str, Any]:
     """List work orders (maintenance jobs).
 
-    To count, pass count_only=true: it reads every page, up to 100,000
-    records, and returns only the number. all_pages=true returns the records
-    themselves, up to 1000, for totals and other aggregates."""
+    To count, use count_only; for totals, all_pages."""
     rt = get_runtime()
     return await _get_list(rt, "/v1/workorders", limit, offset, fields=fields,
                            all_pages=all_pages,
@@ -820,16 +811,14 @@ async def list_work_orders(limit: int = 50, offset: int = 0,
 
 @mcp.tool(name="buildium_list_tenants", annotations=READ_ONLY)
 @_guarded
-async def list_tenants(limit: int = 50, offset: int = 0,
-                       fields: list[str] | None = None,
-                       all_pages: bool = False,
-                       exclude_fixtures: bool = False,
-                       count_only: bool = False) -> dict[str, Any]:
+async def list_tenants(limit: Limit = 50, offset: Offset = 0,
+                       fields: Fields = None,
+                       all_pages: AllPages = False,
+                       exclude_fixtures: ExcludeFixtures = False,
+                       count_only: CountOnly = False) -> dict[str, Any]:
     """List rental tenants.
 
-    To count, pass count_only=true: it reads every page, up to 100,000
-    records, and returns only the number. all_pages=true returns the records
-    themselves, up to 1000, for totals and other aggregates."""
+    To count, use count_only; for totals, all_pages."""
     rt = get_runtime()
     return await _get_list(rt, "/v1/leases/tenants", limit, offset, fields=fields,
                            all_pages=all_pages,
@@ -847,11 +836,11 @@ ROSTER_DETAIL_MAX_LEASES = 300
 @mcp.tool(name="buildium_lease_roster", annotations=READ_ONLY)
 @_guarded
 async def lease_roster(
-    lease_id: int | None = None,
-    property_id: int | None = None,
-    lease_status: str | None = None,
-    limit: int = 1000,
-    exclude_fixtures: bool = False,
+    lease_id: Annotated[int | None, Field(description="Only this lease. Reads just that lease's unit: two requests however large the account.")] = None,
+    property_id: PropertyId = None,
+    lease_status: Annotated[str | None, Field(description='Active, Past or Future: only tenants with a lease term in that state. Active is usually what "who lives here" means, and skips years of past tenants.')] = None,
+    limit: Annotated[int, Field(description="Page size used while reading tenants, 1-1000. It does not cap the roster.")] = 1000,
+    exclude_fixtures: Annotated[bool, Field(description="Leave out tenants created by test tooling, whose names start with the fixture prefix (see buildium_health). When any are present the response says so either way.")] = False,
 ) -> dict[str, Any]:
     """Who is on which lease — the lease-to-tenant join, done in one call.
 
@@ -864,23 +853,9 @@ async def lease_roster(
     membership, so this reads them and inverts the mapping locally.
 
     Every matching tenant is read, following pagination; `complete` says
-    whether that covered them all. With lease_id only that lease's unit is
-    read, which takes two requests however large the portfolio. Above 300
-    leases only the counts are returned (multi_tenant_lease_count and
-    friends); narrow with property_id or lease_id for lease ids and names.
-
-    lease_id:    restrict to a single lease
-    property_id: restrict to leases at one property
-    lease_status: Active, Past or Future — restrict to tenants with a lease
-                 term in that state. Active is usually what "who lives here"
-                 means, and skips years of past tenants.
-    limit:       page size used while fetching tenants (1-1000). It does not
-                 cap the roster.
-    exclude_fixtures: drop tenants created by test tooling (names starting with
-                 the fixture prefix — see buildium_health). This sandbox
-                 accumulates such records permanently, because Buildium offers
-                 DELETE on only 14 of its 462 operations. When any are present
-                 the response says so, so a count is never silently wrong.
+    whether that covered them all. Above 300 leases only the counts are
+    returned (multi_tenant_lease_count and friends); narrow with property_id
+    or lease_id for lease ids and names.
     """
     rt = get_runtime()
     query: dict[str, Any] = {}
@@ -1006,17 +981,15 @@ async def lease_roster(
 
 @mcp.tool(name="buildium_list_gl_accounts", annotations=READ_ONLY)
 @_guarded
-async def list_gl_accounts(limit: int = 100, offset: int = 0,
-                           fields: list[str] | None = None,
-                           all_pages: bool = False,
-                           exclude_fixtures: bool = False,
-                           count_only: bool = False) -> dict[str, Any]:
+async def list_gl_accounts(limit: Limit = 100, offset: Offset = 0,
+                           fields: Fields = None,
+                           all_pages: AllPages = False,
+                           exclude_fixtures: ExcludeFixtures = False,
+                           count_only: CountOnly = False) -> dict[str, Any]:
     """List general ledger accounts. You need these IDs to post rent charges and
     other financial transactions.
 
-    To count, pass count_only=true: it reads every page, up to 100,000
-    records, and returns only the number. all_pages=true returns the records
-    themselves, up to 1000, for totals and other aggregates."""
+    To count, use count_only; for totals, all_pages."""
     rt = get_runtime()
     return await _get_list(rt, "/v1/glaccounts", limit, offset, fields=fields,
                            all_pages=all_pages,
