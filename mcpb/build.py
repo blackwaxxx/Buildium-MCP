@@ -13,9 +13,10 @@ Run from the project virtualenv, which must have the package importable
     .venv/bin/python mcpb/build.py            # stage + pack -> dist/*.mcpb
     .venv/bin/python mcpb/build.py --stage    # stage only, into build/mcpb/
 
-Packing needs Node (``npx @anthropic-ai/mcpb``); staging does not. A lockfile
-is written with ``uv lock`` when uv is on PATH so installs are reproducible;
-without it, Claude Desktop's ``uv sync`` resolves at install time instead.
+Packing needs Node (``npx @anthropic-ai/mcpb``, pinned by MCPB_CLI); staging
+does not. A lockfile is written with ``uv lock`` when uv is on PATH so installs
+are reproducible; without it, Claude Desktop's ``uv sync`` resolves at install
+time instead.
 """
 
 from __future__ import annotations
@@ -126,6 +127,12 @@ ENV: dict[str, str] = {
 
 ENTRY_POINT = "server/main.py"
 
+# The packer that builds every released bundle. Pinned: `npx --yes` on a bare
+# package name runs whatever was published last, so a new release of the
+# packer — or a compromised one — would change what ships without a commit
+# here. 2.1.2 built every bundle up to 0.1.2. Bump it deliberately.
+MCPB_CLI = "@anthropic-ai/mcpb@2.1.2"
+
 
 def project_meta() -> dict[str, Any]:
     return tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
@@ -157,8 +164,8 @@ def render_manifest() -> dict[str, Any]:
             "unless you say otherwise."
         ),
         "long_description": (
-            "Exposes the whole Buildium Open API (462 operations) through 19 "
-            "tools: search the API, describe an endpoint, call it, plus curated "
+            "Exposes the whole Buildium Open API (462 operations) through 20 "
+            "tools: search the API, describe an endpoint, read or call it, plus curated "
             "shortcuts for the common questions. Starts against the Buildium "
             "sandbox. Production access takes two deliberate settings, and the "
             "read-only production modes block every write at the network layer. "
@@ -249,7 +256,7 @@ def pack() -> Path:
     version = project_meta()["version"]
     out = DIST / f"buildium-mcp-{version}.mcpb"
     subprocess.run(
-        [npx, "--yes", "@anthropic-ai/mcpb", "pack", str(STAGE), str(out)],
+        [npx, "--yes", MCPB_CLI, "pack", str(STAGE), str(out)],
         check=True,
     )
     return out

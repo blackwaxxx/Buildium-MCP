@@ -7,8 +7,10 @@ are callable. Run: .venv/bin/python tests/stdio_check.py
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -22,9 +24,13 @@ UPLOAD_POLL_INTERVAL_S = 3
 
 class StdioClient:
     def __init__(self) -> None:
+        # Downloads are confined to one folder; give the server a scratch one
+        # so the round trip does not land in the real ~/Downloads/Buildium.
+        self.download_dir = Path(tempfile.mkdtemp(prefix="buildium-mcp-stdio-"))
         self.proc = subprocess.Popen(
             [str(PY), "-m", "buildium_mcp.server"],
             cwd=str(ROOT),
+            env={**os.environ, "BUILDIUM_DOWNLOAD_DIR": str(self.download_dir)},
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -364,9 +370,9 @@ def main() -> int:
                      "observed, in which case the download checks below are skipped)")
 
                 if file_id:
-                    dest = Path(tmp) / "roundtrip.bin"
+                    dest = client.download_dir / "roundtrip.bin"
                     downloaded = content_payload(client.call("buildium_download_file", {
-                        "file_id": file_id, "save_to": str(dest)}))
+                        "file_id": file_id, "save_to": "roundtrip.bin"}))
                     check("download completes both steps",
                           downloaded.get("ok") is True,
                           str(downloaded.get("error", ""))[:160])
