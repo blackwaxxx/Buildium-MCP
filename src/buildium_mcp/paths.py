@@ -81,48 +81,46 @@ def resolve_spec_path() -> Path:
 def checkout_root() -> Path | None:
     """The repository root, when running from a source checkout.
 
-    Searches upward for a positive marker rather than counting directory levels.
-    ``parents[2]`` was the original bug: correct in a checkout, and inside the
-    interpreter's lib directory in a wheel. A marker search cannot be wrong that
-    way — an installed package has no pyproject.toml above it, so this returns
+    A checkout is recognized by this module's own position: it must sit at
+    ``<root>/src/buildium_mcp/``, with a pyproject.toml at ``<root>``. In a
+    wheel the package's parent is site-packages, never ``src``, so this returns
     None and the caller falls through to the user's config directory.
+
+    It used to search upward for any directory holding a pyproject.toml and a
+    ``src/``. That also matched every project whose virtualenv this package was
+    installed into — ``~/project/.venv/lib/.../site-packages`` has ``~/project``
+    above it — and loaded that unrelated project's .env as if it were ours.
 
     This exists so that a server launched from a checkout by an MCP client —
     which sets the working directory to whatever it likes — still finds the
     checkout's own .env.
     """
-    here = Path(__file__).resolve()
-    for parent in here.parents:
-        if (parent / "pyproject.toml").is_file() and (parent / "src").is_dir():
-            return parent
+    src_dir = Path(__file__).resolve().parent.parent
+    root = src_dir.parent
+    if src_dir.name == "src" and (root / "pyproject.toml").is_file():
+        return root
     return None
 
 
 def env_file_candidates() -> list[Path]:
     """``.env`` locations in descending priority.
 
-    ``load_dotenv`` does not overwrite a variable that is already set, so these
-    must be loaded in this order for the priority to mean anything. The real
-    process environment outranks all of them, which is the documented way an
-    MCP client should pass credentials.
+    A file never overwrites a variable that is already set, so these must be
+    loaded in this order for the priority to mean anything. The real process
+    environment outranks all of them, which is the documented way an MCP
+    client should pass credentials.
 
-    The cwd walk is second so that a developer working inside a checkout gets
-    the checkout's ``.env`` rather than their installed one. A checkout's own
-    root comes third, because an MCP client launches the server with a working
-    directory of its choosing — often not the checkout.
+    The working directory is deliberately not searched. An MCP client starts
+    the server wherever it likes — Claude Code uses the open project — so an
+    upward search from there read whatever .env that project had, and ranked
+    it above the user's own configuration. A developer in a checkout loses
+    nothing: the checkout's root is found from this file's location instead.
     """
     candidates: list[Path] = []
 
     explicit = _env_path("BUILDIUM_ENV_FILE")
     if explicit is not None:
         candidates.append(explicit)
-
-    # dotenv's own upward search from the working directory.
-    from dotenv import find_dotenv
-
-    found = find_dotenv(usecwd=True)
-    if found:
-        candidates.append(Path(found))
 
     root = checkout_root()
     if root is not None:

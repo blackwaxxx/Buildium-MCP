@@ -8,9 +8,11 @@ act on, because a raw traceback tells it nothing about which field was wrong.
 from __future__ import annotations
 
 import json
+import math
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any
 from urllib.parse import urlparse
 
@@ -277,8 +279,7 @@ class BuildiumClient:
 
             # Rate limited — honour Retry-After, then retry.
             if resp.status_code == 429 and attempt <= max_retries:
-                retry_after = float(resp.headers.get("Retry-After", "2") or 2)
-                await _sleep(min(retry_after, 30.0))
+                await _sleep(_retry_after_seconds(resp.headers.get("Retry-After")))
                 continue
 
             if resp.status_code >= 400:
@@ -543,6 +544,35 @@ def _confined(path: str, allowed, purpose: str) -> str:
             status=None,
         )
     return path
+
+
+_RETRY_AFTER_DEFAULT = 2.0
+_RETRY_AFTER_MAX = 30.0
+
+
+def _retry_after_seconds(value: str | None) -> float:
+    """Seconds to wait before retrying, from a Retry-After header.
+
+    The header is either a number of seconds or an HTTP date (RFC 9110). Only
+    the number was handled, so a date raised ValueError out of the tool call.
+    Anything unparseable or non-finite gets the default; the result is clamped
+    to [0, 30] so a hostile or mistaken header cannot stall a call.
+    """
+    if not value or not value.strip():
+        return _RETRY_AFTER_DEFAULT
+    try:
+        seconds = float(value)
+    except ValueError:
+        try:
+            when = parsedate_to_datetime(value)
+        except (TypeError, ValueError):
+            return _RETRY_AFTER_DEFAULT
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        seconds = (when - datetime.now(timezone.utc)).total_seconds()
+    if not math.isfinite(seconds):
+        return _RETRY_AFTER_DEFAULT
+    return min(max(seconds, 0.0), _RETRY_AFTER_MAX)
 
 
 async def _sleep(seconds: float) -> None:

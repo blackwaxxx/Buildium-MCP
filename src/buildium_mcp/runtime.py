@@ -122,10 +122,34 @@ def get_runtime() -> Runtime:
                 remedy=_remedy_for(str(exc)),
                 stage=_stage_for(str(exc)),
             ) from exc
+        except Exception as exc:  # an unreadable .env, say
+            raise StartupError(
+                f"Could not load configuration: {type(exc).__name__}: {exc}",
+                remedy="Check that every .env listed by buildium_health is "
+                       "readable, then restart the server.",
+                stage="config",
+            ) from exc
+        # Anything that escapes here as a bare exception, rather than a
+        # StartupError, is raised by every tool and by buildium_health too.
+        # httpx reads SSL_CERT_FILE when the client is built, so a stale
+        # path in the environment is enough.
+        try:
+            client = BuildiumClient(config)
+        except Exception as exc:
+            raise StartupError(
+                f"Could not create the HTTP client: {type(exc).__name__}: {exc}",
+                remedy=(
+                    "This is almost always TLS or proxy configuration in the "
+                    "server's environment. Check SSL_CERT_FILE, SSL_CERT_DIR and "
+                    "HTTPS_PROXY in your MCP client's env block and your shell, "
+                    "then restart the server."
+                ),
+                stage="client",
+            ) from exc
         _runtime = Runtime(
             config=config,
             index=index,
-            client=BuildiumClient(config),
+            client=client,
             tracker=FixtureTracker(config),
         )
         return _runtime

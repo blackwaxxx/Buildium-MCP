@@ -216,6 +216,16 @@ def check_write(
         if is_download_request_path(path):
             return
 
+        # load_config never produces a blank prefix, but this is the check
+        # that relies on it: every name starts with "", so a blank prefix
+        # would wave any create through.
+        if not prefix.strip():
+            raise GuardViolation(
+                f"POST {path} refused in 'fixtures' mode: the fixture prefix is "
+                "empty, so no name could be checked against it. Set "
+                "BUILDIUM_FIXTURE_PREFIX to a non-blank value."
+            )
+
         # Every label on the payload, not just the top-level one: creating a
         # lease creates its tenants, and an unprefixed tenant is exactly the
         # untagged record this mode exists to prevent.
