@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.2 — 2026-09-23
 
 ### Added
 - `count_only=true` on every list tool and on `buildium_call_endpoint` for any
