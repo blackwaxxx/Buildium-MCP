@@ -1,0 +1,79 @@
+name: Publish to PyPI
+
+# Publishes the wheel and sdist attached to a GitHub release, byte for byte,
+# so the checksums in the release notes hold on PyPI too. Runs when a release
+# is published; run it by hand to publish a release that already exists.
+#
+# Uses PyPI trusted publishing: no API token is stored anywhere. PyPI accepts
+# the upload because it comes from this workflow in this repository, running
+# in the `pypi` environment. See CONTRIBUTING.md for the one-time setup.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish, e.g. v0.1.2"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download the release's wheel and sdist
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # Passed through the environment, never interpolated into the
+          # script, so a tag name cannot inject shell.
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern '*.whl' --pattern '*.tar.gz' --dir dist
+          ls -l dist
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # A release whose files do not match its tag, or a wheel without the
+      # spec, would install and then fail at startup for every user.
+      - name: Check the files before they become permanent
+        env:
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          version="${TAG#v}"
+          count=$(ls dist | wc -l)
+          [ "$count" -eq 2 ] || { echo "::error::expected one wheel and one sdist, found $count files"; exit 1; }
+          [ -f "dist/buildium_mcp-$version-py3-none-any.whl" ] \
+            || { echo "::error::no wheel for version $version"; exit 1; }
+          [ -f "dist/buildium_mcp-$version.tar.gz" ] \
+            || { echo "::error::no sdist for version $version"; exit 1; }
+          python -m zipfile -l "dist/buildium_mcp-$version-py3-none-any.whl" \
+            | grep -q 'buildium_mcp/specs/buildium-openapi.json' \
+            || { echo "::error::the wheel does not contain the OpenAPI spec"; exit 1; }
+          pip install -q twine
+          twine check --strict dist/*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: fetch
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/buildium-mcp/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
