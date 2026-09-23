@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.2.0 — 2026-09-23
+
+### Security
+- `buildium_download_file` writes only inside one folder:
+  `~/Downloads/Buildium`, or `BUILDIUM_DOWNLOAD_DIR`. A path outside it is
+  refused before anything is fetched, symlinks included, and an existing file is
+  replaced only with `overwrite=true`. It used to write wherever it was told, so
+  an instruction planted in a work order, plus a file a tenant uploaded, could
+  overwrite `~/.zshrc`. It is also no longer annotated read-only, so a client
+  that auto-approves read-only tools asks about it.
+- `buildium_upload_file` refuses hidden files and folders (`~/.ssh`, `.env`),
+  files named `*.env`, and this server's own configuration and logs.
+- `fixtures` mode, off the sandbox, now requires a create under an existing
+  record (a lease renewal, a charge or note on a lease) to hang off a record
+  this process created. A renewal with prefixed tenant names used to renew a
+  real lease.
+- Audit logs and downloads are created readable by their owner only, and a log
+  left readable by an earlier version is tightened on the next write. This
+  mattered on Linux, where `~/.local/state` is usually world-readable.
+- CI runs with a read-only token, and the extension packer is pinned to
+  `@anthropic-ai/mcpb@2.1.2` instead of whatever npm published last.
+
+### Added
+- `buildium_get`: a read-only tool for any `GET`, with `fields`, `all_pages` and
+  `count_only`. A client can approve it once and still be asked about every
+  write through `buildium_call_endpoint`, which used to carry reads too and so
+  asked every time. `buildium_call_endpoint` still accepts `GET`.
+- `buildium_health` reports `download_dir`.
+- `buildium_download_file` can pick its own file name (`buildium-file-<id>`
+  plus an extension from the content type), or save into a folder given as
+  `save_to`.
+
+### Changed
+- `buildium_download_file`: `save_to` is optional and relative to the download
+  folder, and a path outside that folder is an error. Set
+  `BUILDIUM_DOWNLOAD_DIR` if you saved files elsewhere.
+- Fixtures-mode refusals name the Claude Desktop toggle as well as the variable.
+- Error messages use the real tool names (`buildium_search_endpoints`, not
+  `search_endpoints`).
+
 ## 0.1.2 — 2026-09-23
 
 ### Added
