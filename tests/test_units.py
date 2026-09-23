@@ -2113,7 +2113,7 @@ async def test_roster_counts_genuine_co_tenancies_even_without_detail(roster_run
 async def test_roster_says_so_when_it_stops_short(roster_runtime, monkeypatch):
     from buildium_mcp import server as server_mod
 
-    monkeypatch.setattr(server_mod, "ROSTER_MAX_TENANTS", 100)
+    monkeypatch.setattr(server_mod, "MAX_SCAN_RECORDS", 100)
     roster_runtime(250)
     result = await server_mod.lease_roster()
     assert result["complete"] is False and result["truncated_at"] == 100
@@ -2205,3 +2205,131 @@ def test_a_client_that_cannot_be_built_is_reported_not_raised(tmp_path, monkeypa
         assert result["ok"] is False and result["type"] == "StartupError"
     finally:
         rt_mod.reset()
+
+
+# -- count_only ------------------------------------------------------------------
+
+
+class _CountingTransport(httpx.AsyncBaseTransport):
+    """`total` records named R0..; the first `fixtures` carry the fixture prefix."""
+
+    def __init__(self, total: int, fixtures: int = 0):
+        self.rows = [
+            {"Id": i, "Name": f"ZZ-MCPTEST-R{i}" if i < fixtures else f"R{i}",
+             "Padding": "x" * 1500}
+            for i in range(total)
+        ]
+        self.requests: list[dict[str, str]] = []
+
+    async def handle_async_request(self, request):
+        params = dict(request.url.params)
+        self.requests.append(params)
+        limit = int(params.get("limit", 50))
+        offset = int(params.get("offset", 0))
+        return httpx.Response(200, json=self.rows[offset:offset + limit])
+
+    async def aclose(self):
+        return None
+
+
+@pytest.fixture
+def counting_runtime(monkeypatch):
+    from buildium_mcp import runtime as rt_mod
+
+    monkeypatch.setenv("BUILDIUM_CLIENT_ID", "x")
+    monkeypatch.setenv("BUILDIUM_CLIENT_SECRET", "y")
+    rt_mod.reset()
+
+    def install(total, fixtures=0):
+        transport = _CountingTransport(total, fixtures)
+        rt_mod.get_runtime().client._client._transport = transport
+        return transport
+
+    yield install
+    rt_mod.reset()
+
+
+async def test_count_only_counts_past_the_record_cap(counting_runtime):
+    """all_pages stops at 1000 so its answer stays small enough to return. A
+    count does not need the records, so it does not need that limit."""
+    from buildium_mcp import server as server_mod
+
+    transport = counting_runtime(4500)
+    result = await server_mod.list_leases(lease_status="Active", count_only=True)
+    assert result["count"] == 4500 and result["complete"] is True
+    assert "data" not in result and result["count_only"] is True
+    assert [r["limit"] for r in transport.requests] == ["1000"] * 5
+    assert all(r["leasestatuses"] == "Active" for r in transport.requests)
+
+
+async def test_count_only_does_not_need_all_pages_too(counting_runtime):
+    from buildium_mcp import server as server_mod
+
+    counting_runtime(1234)
+    result = await server_mod.list_tenants(count_only=True, all_pages=False)
+    assert result["count"] == 1234
+
+
+async def test_count_only_reports_and_can_exclude_fixtures(counting_runtime):
+    from buildium_mcp import server as server_mod
+
+    counting_runtime(1500, fixtures=40)
+    result = await server_mod.list_rentals(count_only=True)
+    assert result["count"] == 1500 and result["fixture_count"] == 40
+    assert "exclude_fixtures" in result["fixture_note"]
+
+    result = await server_mod.list_rentals(count_only=True, exclude_fixtures=True)
+    assert result["count"] == 1460 and result["fixtures_excluded"] is True
+
+
+async def test_count_only_says_when_the_count_is_a_lower_bound(counting_runtime, monkeypatch):
+    from buildium_mcp import server as server_mod
+
+    monkeypatch.setattr(server_mod, "MAX_SCAN_RECORDS", 2000)
+    counting_runtime(2500)
+    result = await server_mod.list_work_orders(count_only=True)
+    assert result["count"] == 2000
+    assert result["complete"] is False and result["truncated_at"] == 2000
+    assert "lower bound" in result["truncation_note"]
+
+
+async def test_call_endpoint_can_count_any_collection(counting_runtime):
+    from buildium_mcp import server as server_mod
+
+    transport = counting_runtime(3001)
+    result = await server_mod.call_endpoint(
+        "GET", "/v1/vendors", query={"statuses": "Active"}, count_only=True
+    )
+    assert result["count"] == 3001 and result["complete"] is True
+    assert transport.requests[0]["statuses"] == "Active"
+
+
+async def test_call_endpoint_count_only_is_get_only(counting_runtime):
+    from buildium_mcp import server as server_mod
+
+    transport = counting_runtime(1)
+    result = await server_mod.call_endpoint(
+        "POST", "/v1/vendors", body={"CompanyName": "x"}, count_only=True
+    )
+    assert result["ok"] is False and "count_only applies to GET only" in result["error"]
+    assert transport.requests == []
+
+
+async def test_all_pages_clamps_its_page_size_to_buildiums_maximum(counting_runtime):
+    from buildium_mcp import server as server_mod
+
+    transport = counting_runtime(10)
+    await server_mod.list_rentals(limit=5000, all_pages=True)
+    assert transport.requests[0]["limit"] == "1000"
+
+
+def test_every_tool_that_pages_can_also_count():
+    """A tool with all_pages and no count_only would leave a large account with
+    no single-call way to count that collection."""
+    from buildium_mcp import server as server_mod
+
+    tools = asyncio.run(server_mod.mcp.list_tools())
+    paging = [t for t in tools if "all_pages" in t.parameters.get("properties", {})]
+    assert len(paging) == 8
+    for tool in paging:
+        assert "count_only" in tool.parameters["properties"], tool.name

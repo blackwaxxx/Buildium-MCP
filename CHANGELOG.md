@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Added
+- `count_only=true` on every list tool and on `buildium_call_endpoint` for any
+  `GET` collection. It follows every page, up to 100,000 records, and returns
+  only the count (honouring `exclude_fixtures`). `all_pages` stops at 1000
+  records because it returns them, so counting a larger collection used to
+  take several calls with `limit` and `offset`.
+
 ### Security
 - A `.env` file now supplies only `BUILDIUM_*` variables. Everything else in
   it used to be imported too, and httpx honours `HTTPS_PROXY` and
@@ -31,6 +38,8 @@
   listing, which no client would accept as one result. `limit` is now the page
   size, default 1000.
 - A `Retry-After` header in HTTP-date form raised `ValueError` out of the tool.
+- `all_pages` with a `limit` above 1000 sent that limit to Buildium, which
+  rejects it. The page size is now clamped to 1000.
 - A failure while building the HTTP client (for example a stale
   `SSL_CERT_FILE`) crashed every tool, `buildium_health` included. It is now a
   startup error with a remedy, like a missing key.

@@ -208,6 +208,7 @@ async def call_endpoint(
     fields: list[str] | None = None,
     confirm: bool = False,
     all_pages: bool = False,
+    count_only: bool = False,
 ) -> dict[str, Any]:
     """Call any Buildium endpoint.
 
@@ -219,10 +220,12 @@ async def call_endpoint(
              are large — passing e.g. ["Id","Name","PropertyIds"] avoids pulling
              tax IDs and full addresses you did not ask for.
     confirm: required (true) for DELETE
-    all_pages: GET only — follow pagination to the end instead of returning the
-             first page. Use it whenever you are counting or aggregating; a
-             count taken from one page is wrong whenever the collection is
-             larger than the page.
+    all_pages: GET only — follow pagination instead of returning the first
+             page, and return the records, up to 1000. Use it for totals and
+             other aggregates; a figure taken from one page is wrong whenever
+             the collection is larger than the page.
+    count_only: GET only — follow every page, up to 100,000 records, and
+             return only how many there are. Use it for "how many" questions.
 
     Write guardrails apply — see buildium_health for the active mode. In the
     default 'fixtures' mode, every name in a create payload must carry the
@@ -248,11 +251,16 @@ async def call_endpoint(
     except GuardViolation as exc:
         return _err(exc)
 
+    if (all_pages or count_only) and method.upper() != "GET":
+        flag = "count_only" if count_only else "all_pages"
+        return {"ok": False,
+                "error": f"{flag} applies to GET only; "
+                         f"{method.upper()} returns a single result."}
+
+    if count_only:
+        return await _count_all(rt, request_path, query)
+
     if all_pages:
-        if method.upper() != "GET":
-            return {"ok": False,
-                    "error": "all_pages applies to GET only; "
-                             f"{method.upper()} returns a single result."}
         try:
             records, truncated = await rt.client.get_all_pages(
                 request_path, query, max_records=MAX_AUTO_RECORDS
@@ -423,24 +431,80 @@ async def download_file(
 # ---------------------------------------------------------------------------
 
 
-# Ceiling on an auto-paginated fetch. High enough for every collection in a
-# normal portfolio, low enough that a mistake costs seconds rather than
-# thousands of requests.
+# Ceiling on an auto-paginated fetch that returns records. A context limit,
+# not an API one: a lease record is about 1.6 KB, so a thousand of them is
+# already far more than an MCP client accepts as one tool result.
 MAX_AUTO_RECORDS = 1000
+
+# Ceiling on a fetch that keeps almost nothing per record: count_only, and
+# lease_roster. Its only job is to stop a runaway loop — 100 requests at
+# Buildium's maximum page size. Real portfolios, past tenants included, fit.
+MAX_SCAN_RECORDS = 100_000
+
+
+async def _count_all(
+    rt: Runtime, path: str, query: dict[str, Any] | None,
+    exclude_fixtures: bool = False,
+) -> dict[str, Any]:
+    """Follow every page and return only how many records there are.
+
+    Keeps one boolean per record, so it can read MAX_SCAN_RECORDS without
+    holding them. Before this, "how many active leases" in a 5,000-lease
+    account meant five calls with limit and offset, because all_pages stops at
+    MAX_AUTO_RECORDS to keep its answer small enough to return.
+    """
+    prefix = rt.config.fixture_prefix
+    try:
+        flags, truncated = await rt.client.get_all_pages(
+            path, query, page_size=1000, max_records=MAX_SCAN_RECORDS,
+            keep=lambda record: _is_fixture(record, prefix),
+        )
+    except BuildiumError as exc:
+        return _err(exc)
+
+    fixtures = sum(flags)
+    result: dict[str, Any] = {
+        "ok": True,
+        "count": len(flags) - fixtures if exclude_fixtures else len(flags),
+        "complete": not truncated,
+        "truncated_at": MAX_SCAN_RECORDS if truncated else None,
+        "pages_followed": True,
+        "count_only": True,
+    }
+    if fixtures:
+        result["fixture_count"] = fixtures
+        result["fixtures_excluded"] = exclude_fixtures
+        if not exclude_fixtures:
+            result["fixture_note"] = (
+                f"{fixtures} of these {len(flags)} records are test fixtures "
+                f"(name starts with {prefix!r}). Pass exclude_fixtures=true to "
+                "count only genuine data."
+            )
+    if truncated:
+        result["truncation_note"] = (
+            f"Stopped after {MAX_SCAN_RECORDS} records with more remaining, so "
+            "the count is a lower bound. Narrow the query with a filter."
+        )
+    return result
 
 
 async def _get_list(
     rt: Runtime,
     path: str, limit: int, offset: int, extra: dict[str, Any] | None = None,
     fields: list[str] | None = None, all_pages: bool = False,
-    exclude_fixtures: bool = False,
+    exclude_fixtures: bool = False, count_only: bool = False,
 ) -> dict[str, Any]:
     query: dict[str, Any] = {k: v for k, v in (extra or {}).items() if v is not None}
 
+    if count_only:
+        return await _count_all(rt, path, query, exclude_fixtures)
+
     if all_pages:
         try:
+            # Clamped: Buildium rejects a limit above 1000.
             records, truncated = await rt.client.get_all_pages(
-                path, query, page_size=max(limit, 100), max_records=MAX_AUTO_RECORDS
+                path, query, page_size=min(max(limit, 100), 1000),
+                max_records=MAX_AUTO_RECORDS,
             )
         except BuildiumError as exc:
             return _err(exc)
@@ -480,16 +544,20 @@ async def _get_list(
 async def list_rentals(limit: int = 50, offset: int = 0,
                        fields: list[str] | None = None,
                        all_pages: bool = False,
-                       exclude_fixtures: bool = False) -> dict[str, Any]:
+                       exclude_fixtures: bool = False,
+                       count_only: bool = False) -> dict[str, Any]:
     """List rental properties. Pass `fields` to narrow large records.
 
-    Set all_pages=true to follow pagination to the end in one call — do that
-    whenever you are counting or aggregating, since a single page is only the
-    first 50 records and a count taken from it will be wrong."""
+    A single page is only the first 50 records, so a count or total taken from
+    it will be wrong.
+    To count, pass count_only=true: it reads every page, up to 100,000
+    records, and returns only the number. all_pages=true returns the records
+    themselves, up to 1000, for totals and other aggregates."""
     rt = get_runtime()
     return await _get_list(rt, "/v1/rentals", limit, offset, fields=fields,
                            all_pages=all_pages,
-                           exclude_fixtures=exclude_fixtures)
+                           exclude_fixtures=exclude_fixtures,
+                           count_only=count_only)
 
 
 @mcp.tool(name="buildium_get_rental", annotations=READ_ONLY)
@@ -509,15 +577,18 @@ async def get_rental(rental_id: int, fields: list[str] | None = None) -> dict[st
 async def list_units(property_id: int | None = None, limit: int = 50, offset: int = 0,
                      fields: list[str] | None = None,
                      all_pages: bool = False,
-                       exclude_fixtures: bool = False) -> dict[str, Any]:
+                     exclude_fixtures: bool = False,
+                     count_only: bool = False) -> dict[str, Any]:
     """List rental units, optionally filtered to one property.
 
-    Set all_pages=true when counting or aggregating; one page is not the
-    whole collection."""
+    To count, pass count_only=true: it reads every page, up to 100,000
+    records, and returns only the number. all_pages=true returns the records
+    themselves, up to 1000, for totals and other aggregates."""
     rt = get_runtime()
     return await _get_list(rt, "/v1/rentals/units", limit, offset,
                            {"propertyids": property_id}, fields, all_pages,
-                           exclude_fixtures=exclude_fixtures)
+                           exclude_fixtures=exclude_fixtures,
+                           count_only=count_only)
 
 
 @mcp.tool(name="buildium_list_leases", annotations=READ_ONLY)
@@ -526,7 +597,8 @@ async def list_leases(property_id: int | None = None, lease_status: str | None =
                       limit: int = 50, offset: int = 0,
                       fields: list[str] | None = None,
                       all_pages: bool = False,
-                       exclude_fixtures: bool = False) -> dict[str, Any]:
+                      exclude_fixtures: bool = False,
+                      count_only: bool = False) -> dict[str, Any]:
     """List leases. lease_status is one of Active, Future, Past, Expired.
 
     Each row already carries the rent terms under `AccountDetails` (including
@@ -537,11 +609,13 @@ async def list_leases(property_id: int | None = None, lease_status: str | None =
 
     For who is on each lease, use buildium_lease_roster.
 
-    Set all_pages=true when counting or aggregating across every lease."""
+    To count, pass count_only=true: it reads every page, up to 100,000
+    records, and returns only the number. all_pages=true returns the records
+    themselves, up to 1000, for totals and other aggregates."""
     rt = get_runtime()
     return await _get_list(rt, "/v1/leases", limit, offset,
                            {"propertyids": property_id, "leasestatuses": lease_status},
-                           fields, all_pages, exclude_fixtures)
+                           fields, all_pages, exclude_fixtures, count_only)
 
 
 @mcp.tool(name="buildium_get_lease", annotations=READ_ONLY)
@@ -561,17 +635,20 @@ async def get_lease(lease_id: int, fields: list[str] | None = None) -> dict[str,
 async def list_lease_transactions(lease_id: int, limit: int = 50, offset: int = 0,
                                   fields: list[str] | None = None,
                                   all_pages: bool = False,
-                                  exclude_fixtures: bool = False) -> dict[str, Any]:
+                                  exclude_fixtures: bool = False,
+                                  count_only: bool = False) -> dict[str, Any]:
     """List financial transactions (posted charges and payments) for a lease.
 
     For the lease's recurring rent amount use buildium_list_leases instead —
     it is already on every row under AccountDetails.Rent.
 
-    Set all_pages=true when totalling a ledger."""
+    Set all_pages=true when totalling a ledger, and count_only=true to learn
+    only how many transactions there are (every page, up to 100,000)."""
     rt = get_runtime()
     return await _get_list(rt, f"/v1/leases/{lease_id}/transactions", limit, offset,
                            fields=fields, all_pages=all_pages,
-                           exclude_fixtures=exclude_fixtures)
+                           exclude_fixtures=exclude_fixtures,
+                           count_only=count_only)
 
 
 @mcp.tool(name="buildium_list_work_orders", annotations=READ_ONLY)
@@ -579,14 +656,18 @@ async def list_lease_transactions(lease_id: int, limit: int = 50, offset: int = 
 async def list_work_orders(limit: int = 50, offset: int = 0,
                            fields: list[str] | None = None,
                            all_pages: bool = False,
-                       exclude_fixtures: bool = False) -> dict[str, Any]:
+                           exclude_fixtures: bool = False,
+                           count_only: bool = False) -> dict[str, Any]:
     """List work orders (maintenance jobs).
 
-    Set all_pages=true when counting or aggregating."""
+    To count, pass count_only=true: it reads every page, up to 100,000
+    records, and returns only the number. all_pages=true returns the records
+    themselves, up to 1000, for totals and other aggregates."""
     rt = get_runtime()
     return await _get_list(rt, "/v1/workorders", limit, offset, fields=fields,
                            all_pages=all_pages,
-                           exclude_fixtures=exclude_fixtures)
+                           exclude_fixtures=exclude_fixtures,
+                           count_only=count_only)
 
 
 @mcp.tool(name="buildium_list_tenants", annotations=READ_ONLY)
@@ -594,26 +675,23 @@ async def list_work_orders(limit: int = 50, offset: int = 0,
 async def list_tenants(limit: int = 50, offset: int = 0,
                        fields: list[str] | None = None,
                        all_pages: bool = False,
-                       exclude_fixtures: bool = False) -> dict[str, Any]:
+                       exclude_fixtures: bool = False,
+                       count_only: bool = False) -> dict[str, Any]:
     """List rental tenants.
 
-    Set all_pages=true when counting or aggregating."""
+    To count, pass count_only=true: it reads every page, up to 100,000
+    records, and returns only the number. all_pages=true returns the records
+    themselves, up to 1000, for totals and other aggregates."""
     rt = get_runtime()
     return await _get_list(rt, "/v1/leases/tenants", limit, offset, fields=fields,
                            all_pages=all_pages,
-                           exclude_fixtures=exclude_fixtures)
+                           exclude_fixtures=exclude_fixtures,
+                           count_only=count_only)
 
 
-# How far lease_roster will read. Not a context limit like MAX_AUTO_RECORDS:
-# the roster keeps three fields per tenant and returns a compact join, so
-# the only job of this ceiling is to stop a runaway loop — 100 requests at
-# Buildium's maximum page size. Real portfolios, past tenants included,
-# fit under it.
-ROSTER_MAX_TENANTS = 100_000
-
-# Above this many leases the per-lease detail is left out. At roughly 250
-# bytes a lease, a few hundred is already more than an MCP client will accept
-# as one tool result; the counts and lease ids stay, and those are what a
+# Above this many leases the per-lease detail and the lease id lists are left
+# out. At roughly 250 bytes a lease, a few hundred is already more than an MCP
+# client will accept as one tool result; the counts stay, and those are what a
 # whole-portfolio question needs.
 ROSTER_DETAIL_MAX_LEASES = 300
 
@@ -700,7 +778,7 @@ async def lease_roster(
     try:
         rows, truncated = await rt.client.get_all_pages(
             "/v1/leases/tenants", query,
-            page_size=min(max(limit, 1), 1000), max_records=ROSTER_MAX_TENANTS,
+            page_size=min(max(limit, 1), 1000), max_records=MAX_SCAN_RECORDS,
             keep=compact,
         )
     except BuildiumError as exc:
@@ -734,7 +812,7 @@ async def lease_roster(
     out: dict[str, Any] = {
         "ok": True,
         "complete": not truncated,
-        "truncated_at": ROSTER_MAX_TENANTS if truncated else None,
+        "truncated_at": MAX_SCAN_RECORDS if truncated else None,
         "lease_count": len(roster),
         "tenants_seen": len(rows),
         "multi_tenant_lease_count": len(multi),
@@ -756,7 +834,7 @@ async def lease_roster(
         )
     if truncated:
         out["truncation_note"] = (
-            f"Stopped after {ROSTER_MAX_TENANTS} tenants with more remaining, so "
+            f"Stopped after {MAX_SCAN_RECORDS} tenants with more remaining, so "
             "leases whose tenants lie past that point are missing or "
             "undercounted. Pass property_id or lease_status to narrow the query."
         )
@@ -783,15 +861,19 @@ async def lease_roster(
 async def list_gl_accounts(limit: int = 100, offset: int = 0,
                            fields: list[str] | None = None,
                            all_pages: bool = False,
-                       exclude_fixtures: bool = False) -> dict[str, Any]:
+                           exclude_fixtures: bool = False,
+                           count_only: bool = False) -> dict[str, Any]:
     """List general ledger accounts. You need these IDs to post rent charges and
     other financial transactions.
 
-    Set all_pages=true when counting or aggregating."""
+    To count, pass count_only=true: it reads every page, up to 100,000
+    records, and returns only the number. all_pages=true returns the records
+    themselves, up to 1000, for totals and other aggregates."""
     rt = get_runtime()
     return await _get_list(rt, "/v1/glaccounts", limit, offset, fields=fields,
                            all_pages=all_pages,
-                           exclude_fixtures=exclude_fixtures)
+                           exclude_fixtures=exclude_fixtures,
+                           count_only=count_only)
 
 
 def main() -> None:
