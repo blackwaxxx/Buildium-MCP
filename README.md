@@ -57,17 +57,17 @@ has access to your computer; both are standard for every local extension — see
 
 ### Any other MCP client
 
-Requires Python 3.11+. Install from GitHub:
+Requires Python 3.11+.
 
 ```bash
-pip install "git+https://github.com/blackwaxxx/Buildium-MCP"
+pip install buildium-mcp
 ```
 
-Append `@v0.1.2` (or any later release tag) to pin a version.
-
-This project is **not on PyPI yet**. Do not `pip install buildium-mcp`: until it
-is published from this repository, a package under that name is someone else's
-code, and it would be handed your Buildium keys.
+Releases are published to [PyPI](https://pypi.org/project/buildium-mcp/) from
+this repository's release workflow, with the same files and checksums as the
+[GitHub releases](https://github.com/blackwaxxx/Buildium-MCP/releases). To run
+unreleased code, install from GitHub instead:
+`pip install "git+https://github.com/blackwaxxx/Buildium-MCP"`.
 
 Sandbox is a **separate Buildium account** from production — production keys do
 not authenticate against `apisandbox.buildium.com`.
