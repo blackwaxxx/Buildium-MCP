@@ -1,6 +1,6 @@
 [project]
 name = "buildium-mcp"
-version = "0.1.2"
+version = "0.2.0"
 description = "MCP gateway for the Buildium Open API — 462 operations via a small tool surface"
 readme = "README.md"
 license = "MIT"
